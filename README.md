@@ -6,7 +6,7 @@ A Boring(SSL)-compatible API abstraction for Rust cryptographic implementations.
 
 Superboring hides the complexity, diversity and instability of cryptographic implementations written in Rust behind an emulation of the `boring` API (Rust excellent wrappers for BoringSSL).
 
-This allows application written using the `boring` API to be able to also use pure Rust implementations without having to maintain two code bases.
+This allows applications written using the `boring` API to be able to also use pure Rust implementations without having to maintain two code bases.
 
 ## Why use emulation instead of always using `boring`?
 
