@@ -37,6 +37,7 @@ pub mod rsa {
     #[allow(unused_imports)]
     use super::*;
 
+    #[allow(clippy::large_enum_variant)]
     #[derive(Debug, Clone, PartialEq, Eq, Default)]
     pub enum RsaKey {
         #[default]
@@ -453,6 +454,7 @@ pub mod pkey {
 
     impl HasPrivate for Private {}
 
+    #[allow(clippy::large_enum_variant)]
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub enum PKey<T> {
         #[default]
@@ -558,6 +560,7 @@ pub mod sign {
             Ok(())
         }
 
+        #[allow(clippy::len_without_is_empty)]
         pub fn len(&self) -> Result<usize, ErrorStack> {
             let rsa_key = if let PKey::Rsa(x) = self.pkey_ref {
                 x
