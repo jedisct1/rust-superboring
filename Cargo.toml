@@ -1,12 +1,18 @@
 [package]
 name = "superboring"
+description = "A reimplementation of the 'boring' crate in pure Rust."
 version = "0.1.0"
+authors = ["Frank Denis <github@pureftpd.org>"]
 edition = "2021"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+license = "ISC"
+repository = "https://github.com/jedisct1/rust-superboring"
+homepage = "https://github.com/jedisct1/rust-superboring"
+categories = ["wasm", "api-bindings", "cryptography"]
+keywords = ["boringssl", "crypto", "cryptography", "boring", "rust"]
+readme = "README.md"
 
 [dependencies]
-rsa = { version = "0.9.6", features = [
+rrsa = { package = "rsa", version = "0.9.6", features = [
     "getrandom",
     "hazmat",
     "pem",
@@ -18,3 +24,7 @@ rsa = { version = "0.9.6", features = [
 rand = { version = "0.8.5" }
 hmac-sha256 = { version = "1.1.7", features = ["traits010"] }
 hmac-sha512 = { version = "1.1.5", features = ["traits010", "sha384"] }
+
+# Do not delete: this is a required hack for the wasm32-unknown-unknown target used by dependencies
+[target.'cfg(all(any(target_arch = "wasm32", target_arch = "wasm64"), target_os = "unknown"))'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }
