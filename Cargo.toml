@@ -28,8 +28,6 @@ hmac-sha512 = { version = "1.1.5", optional = true, features = [
     "sha384",
 ] }
 
-boring = { version = "4.2.0", optional = true }
-
 # Do not delete: this is a required hack for the wasm32-unknown-unknown target used by dependencies
 [target.'cfg(all(any(target_arch = "wasm32", target_arch = "wasm64"), target_os = "unknown"))'.dependencies]
 getrandom = { version = "0.2", features = ["js"] }
@@ -37,4 +35,3 @@ getrandom = { version = "0.2", features = ["js"] }
 [features]
 default = ["enabled"]
 enabled = ["rrsa", "rand", "hmac-sha256", "hmac-sha512"]
-really-boring = ["boring"]
