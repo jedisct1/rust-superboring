@@ -1,4 +1,4 @@
-# ![Superboring](https://raw.github.com/jedisct1/superboring/master/logo.png)
+# ![Superboring](https://raw.github.com/jedisct1/rust-superboring/master/logo.png)
 
 A Boring(SSL)-compatible API abstraction for Rust cryptographic implementations.
 
