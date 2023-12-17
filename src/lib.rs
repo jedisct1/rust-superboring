@@ -34,6 +34,8 @@ pub mod reexports {
 #[allow(unused_imports)]
 use rsa::*;
 pub mod rsa {
+    use rrsa::pkcs8::EncodePrivateKey;
+
     #[allow(unused_imports)]
     use super::*;
 
@@ -96,6 +98,13 @@ pub mod rsa {
             rsa_key.size() * 8
         }
 
+        pub fn check_key(&self) -> Result<bool, ErrorStack> {
+            match self.bits() {
+                2048 | 3072 | 4096 => Ok(true),
+                _ => Ok(false),
+            }
+        }
+
         pub fn public_key_from_der(der: &[u8]) -> Result<Rsa<Public>, ErrorStack> {
             let rsa_public_key = rrsa::RsaPublicKey::from_public_key_der(der)
                 .map_err(|_| ErrorStack::InvalidPublicKey)?;
@@ -148,26 +157,26 @@ pub mod rsa {
             })
         }
 
-        pub fn n(&self) -> Result<BigNum, ErrorStack> {
+        pub fn n(&self) -> BigNum {
             let rsa_key = if let RsaKey::Public(x) = &self.rsa_key {
                 x
             } else {
                 unreachable!();
             };
-            Ok(BigNum {
+            BigNum {
                 rsa_bn: rsa_key.n().clone(),
-            })
+            }
         }
 
-        pub fn e(&self) -> Result<BigNum, ErrorStack> {
+        pub fn e(&self) -> BigNum {
             let rsa_key = if let RsaKey::Public(x) = &self.rsa_key {
                 x
             } else {
                 unreachable!();
             };
-            Ok(BigNum {
+            BigNum {
                 rsa_bn: rsa_key.e().clone(),
-            })
+            }
         }
 
         pub fn public_key_to_der(&self) -> Result<Vec<u8>, ErrorStack> {
@@ -244,9 +253,25 @@ pub mod rsa {
             rsa_key.size() * 8
         }
 
+        pub fn check_key(&self) -> Result<bool, ErrorStack> {
+            let rsa_key = if let RsaKey::Private(x) = &self.rsa_key {
+                x
+            } else {
+                unreachable!();
+            };
+            match self.bits() {
+                2048 | 3072 | 4096 => {}
+                _ => return Ok(false),
+            };
+            if rsa_key.validate().is_err() {
+                return Ok(false);
+            }
+            Ok(true)
+        }
+
         pub fn public_key(&self) -> Result<Rsa<Public>, ErrorStack> {
-            let n = self.n()?;
-            let e = self.e()?;
+            let n = self.n();
+            let e = self.e();
             Rsa::from_public_components(n, e)
         }
 
@@ -294,59 +319,73 @@ pub mod rsa {
             Ok(bytes)
         }
 
-        pub fn n(&self) -> Result<BigNum, ErrorStack> {
+        pub fn private_key_to_der(&self) -> Result<Vec<u8>, ErrorStack> {
             let rsa_key = if let RsaKey::Private(x) = &self.rsa_key {
                 x
             } else {
                 unreachable!();
             };
-            Ok(BigNum {
+            let bytes = rsa_key
+                .to_pkcs8_der()
+                .map_err(|_| ErrorStack::InvalidPrivateKey)?
+                .as_bytes()
+                .to_vec();
+            Ok(bytes)
+        }
+
+        pub fn n(&self) -> BigNum {
+            let rsa_key = if let RsaKey::Private(x) = &self.rsa_key {
+                x
+            } else {
+                unreachable!();
+            };
+            BigNum {
                 rsa_bn: rsa_key.n().clone(),
-            })
+            }
         }
 
-        pub fn d(&self) -> Result<BigNum, ErrorStack> {
+        pub fn d(&self) -> BigNum {
             let rsa_key = if let RsaKey::Private(x) = &self.rsa_key {
                 x
             } else {
                 unreachable!();
             };
-            Ok(BigNum {
+            BigNum {
                 rsa_bn: rsa_key.d().clone(),
-            })
+            }
         }
 
-        pub fn e(&self) -> Result<BigNum, ErrorStack> {
+        pub fn e(&self) -> BigNum {
             let rsa_key = if let RsaKey::Private(x) = &self.rsa_key {
                 x
             } else {
                 unreachable!();
             };
-            Ok(BigNum {
+            BigNum {
                 rsa_bn: rsa_key.e().clone(),
-            })
+            }
         }
 
-        pub fn p(&self) -> Result<BigNum, ErrorStack> {
+        pub fn p(&self) -> BigNum {
             let rsa_key = if let RsaKey::Private(x) = &self.rsa_key {
                 x
             } else {
                 unreachable!();
             };
-            Ok(BigNum {
+            BigNum {
                 rsa_bn: rsa_key.primes()[0].clone(),
-            })
+            }
         }
 
-        pub fn q(&self) -> Result<BigNum, ErrorStack> {
+        pub fn q(&self) -> BigNum {
             let rsa_key = if let RsaKey::Private(x) = &self.rsa_key {
                 x
             } else {
                 unreachable!();
             };
-            Ok(BigNum {
+            BigNum {
                 rsa_bn: rsa_key.primes()[1].clone(),
-            })
+            }
         }
     }
 }
@@ -397,6 +436,8 @@ pub mod bn {
         pub rsa_bn: rrsa::BigUint,
     }
 
+    pub type BigNumRef<'a> = BigNum;
+
     impl BigNum {
         pub fn from_slice(slice: &[u8]) -> Result<Self, ErrorStack> {
             let rsa_bn = rrsa::BigUint::from_bytes_be(slice);
@@ -405,6 +446,10 @@ pub mod bn {
 
         pub fn to_vec(&self) -> Vec<u8> {
             self.rsa_bn.to_bytes_be()
+        }
+
+        pub fn to_owned(&self) -> Result<BigNum, ErrorStack> {
+            Ok(self.clone())
         }
     }
 }
@@ -443,7 +488,10 @@ pub mod pkey {
     #[allow(unused_imports)]
     use super::*;
 
+    #[derive(Debug, Copy, Clone, PartialEq, Eq)]
     pub enum Public {}
+
+    #[derive(Debug, Copy, Clone, PartialEq, Eq)]
     pub enum Private {}
 
     pub trait HasPublic {}

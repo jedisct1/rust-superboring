@@ -1,3 +1,3 @@
 # Superboring
 
-A BoringSSL API abstraction to hide the complexity of Rust cryptographic primitives.
+A Boring(SSL)-compatible API abstraction for Rust cryptographic implementations.
