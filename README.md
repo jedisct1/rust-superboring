@@ -18,17 +18,19 @@ All of them are just features that haven't been implemented in the `boring` crat
 
 While BoringSSL itself [can be compiled to WebAssembly](https://github.com/jedisct1/boringssl-wasm), the `boring` crate currently doesn't support this.
 
-### Static builds
-
-The `boring` crate (actually `boring-sys`) currently doesn't have the ability to create static builds.
-
-Even though by default, [musl makes Rust code slow](https://andygrove.io/2020/05/why-musl-extremely-slow/), pure Rust code generally supports static builds out of the box.
-
 ### Symbol collisions with OpenSSL
 
 OpenSSL and BoringSSL share a lot of symbols, which can cause collisions.
 
 BoringSSL has the ability to prefix symbols in order to avoid this. But the `boring` crate currently doesn't support this.
+
+## Static builds
+
+The real `boring` crate supports static builds using `musl`, so emulation is not required. Just use [`cargo-zigbuild`](https://github.com/rust-cross/cargo-zigbuild):
+
+```sh
+cargo zigbuild --target=x86_64-unknown-linux-musl
+```
 
 ## What is currently implemented?
 
