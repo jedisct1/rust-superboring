@@ -28,6 +28,7 @@ use rrsa::traits::{
 pub mod reexports {
     pub use hmac_sha256;
     pub use hmac_sha512;
+    pub use rand;
     pub use rrsa as rsa;
 }
 
