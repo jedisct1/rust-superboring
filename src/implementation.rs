@@ -227,6 +227,32 @@ pub mod rsa {
                 .map_err(|_| ErrorStack::InvalidPublicKey)?
                 .into_bytes())
         }
+
+        pub fn public_encrypt(
+            &self,
+            from: &[u8],
+            to: &mut [u8],
+            padding: Padding,
+        ) -> Result<usize, ErrorStack> {
+            let rsa_key = if let RsaKey::Public(x) = &self.rsa_key {
+                x
+            } else {
+                unreachable!();
+            };
+            let padding = match padding {
+                Padding::NONE => panic!("Padding not set"),
+                Padding::PKCS1 => rrsa::Pkcs1v15Encrypt,
+                Padding::PKCS1_PSS => panic!("Invalid padding for encryption"),
+            };
+            let mut rng = rand::thread_rng();
+            let c = rsa_key
+                .encrypt(&mut rng, padding, from)
+                .map_err(|_| ErrorStack::InvalidPublicKey)?;
+            let len = c.len();
+            to.fill(0);
+            to[0..len].copy_from_slice(&c);
+            Ok(len)
+        }
     }
 
     impl Rsa<Private> {
@@ -387,6 +413,32 @@ pub mod rsa {
             BigNum {
                 rsa_bn: rsa_key.primes()[1].clone(),
             }
+        }
+
+        pub fn private_decrypt(
+            &self,
+            from: &[u8],
+            to: &mut [u8],
+            padding: Padding,
+        ) -> Result<usize, ErrorStack> {
+            let rsa_key = if let RsaKey::Private(x) = &self.rsa_key {
+                x
+            } else {
+                unreachable!();
+            };
+            let padding = match padding {
+                Padding::NONE => panic!("Padding not set"),
+                Padding::PKCS1 => rrsa::Pkcs1v15Encrypt,
+                Padding::PKCS1_PSS => panic!("Invalid padding for encryption"),
+            };
+            let mut rng = rand::thread_rng();
+            let m = rsa_key
+                .decrypt_blinded(&mut rng, padding, from)
+                .map_err(|_| ErrorStack::InvalidPrivateKey)?;
+            let len = m.len();
+            to.fill(0);
+            to[0..len].copy_from_slice(&m);
+            Ok(len)
         }
     }
 }
