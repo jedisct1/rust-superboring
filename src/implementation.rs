@@ -960,3 +960,25 @@ fn test_rsa_pss() {
     let res = verifier.verify(&signature).unwrap();
     assert!(res);
 }
+
+#[test]
+fn test_rsa_encrypt_decrypt() {
+    let sk = Rsa::generate(2048).unwrap();
+    let pk = sk.public_key().unwrap();
+
+    let mut ciphertext = [0u8; 256];
+    let mut recovered_plaintext = [0u8; 256];
+
+    let len = pk
+        .public_encrypt(b"hello", &mut ciphertext, Padding::PKCS1)
+        .unwrap();
+    let len2 = sk
+        .private_decrypt(
+            &ciphertext[0..len],
+            &mut recovered_plaintext,
+            Padding::PKCS1,
+        )
+        .unwrap();
+
+    assert_eq!(&recovered_plaintext[0..len2], b"hello");
+}
