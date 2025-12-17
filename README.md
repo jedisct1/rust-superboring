@@ -34,4 +34,7 @@ cargo zigbuild --target=x86_64-unknown-linux-musl
 
 ## What is currently implemented?
 
-Superboring currently implements pretty much everything required to handle RSA signatures.
+- RSA operations: key generation (2048/3072/4096 bits), import/export (DER/PEM, PKCS1/PKCS8), encryption/decryption (PKCS1v15 and OAEP), signatures (PKCS1v15 and PSS with SHA-256/384/512)
+- AES key wrap: RFC 3394 key wrapping with AES-128 and AES-256
+- AES-GCM: authenticated encryption with AES-128-GCM and AES-256-GCM
+- Hash functions: SHA-256, SHA-384, SHA-512 (via `MessageDigest`)
