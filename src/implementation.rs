@@ -61,6 +61,7 @@ pub mod rsa {
         None,
         Pkcs1,
         Pkcs1Pss,
+        Pkcs1Oaep,
     }
 
     #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -79,6 +80,10 @@ pub mod rsa {
 
         pub const PKCS1_PSS: Padding = Padding {
             id: PaddingId::Pkcs1Pss,
+        };
+
+        pub const PKCS1_OAEP: Padding = Padding {
+            id: PaddingId::Pkcs1Oaep,
         };
     }
 
@@ -239,15 +244,17 @@ pub mod rsa {
             } else {
                 unreachable!();
             };
-            let padding = match padding {
-                Padding::NONE => panic!("Padding not set"),
-                Padding::PKCS1 => rrsa::Pkcs1v15Encrypt,
-                Padding::PKCS1_PSS => panic!("Invalid padding for encryption"),
-            };
             let mut rng = rand::thread_rng();
-            let c = rsa_key
-                .encrypt(&mut rng, padding, from)
-                .map_err(|_| ErrorStack::InvalidPublicKey)?;
+            let c = match padding.id {
+                PaddingId::None => panic!("Padding not set"),
+                PaddingId::Pkcs1 => rsa_key
+                    .encrypt(&mut rng, rrsa::Pkcs1v15Encrypt, from)
+                    .map_err(|_| ErrorStack::InvalidPublicKey)?,
+                PaddingId::Pkcs1Pss => panic!("Invalid padding for encryption"),
+                PaddingId::Pkcs1Oaep => rsa_key
+                    .encrypt(&mut rng, rrsa::Oaep::new::<Sha256>(), from)
+                    .map_err(|_| ErrorStack::InvalidPublicKey)?,
+            };
             let len = c.len();
             to.fill(0);
             to[0..len].copy_from_slice(&c);
@@ -426,15 +433,17 @@ pub mod rsa {
             } else {
                 unreachable!();
             };
-            let padding = match padding {
-                Padding::NONE => panic!("Padding not set"),
-                Padding::PKCS1 => rrsa::Pkcs1v15Encrypt,
-                Padding::PKCS1_PSS => panic!("Invalid padding for encryption"),
-            };
             let mut rng = rand::thread_rng();
-            let m = rsa_key
-                .decrypt_blinded(&mut rng, padding, from)
-                .map_err(|_| ErrorStack::InvalidPrivateKey)?;
+            let m = match padding.id {
+                PaddingId::None => panic!("Padding not set"),
+                PaddingId::Pkcs1 => rsa_key
+                    .decrypt_blinded(&mut rng, rrsa::Pkcs1v15Encrypt, from)
+                    .map_err(|_| ErrorStack::InvalidPrivateKey)?,
+                PaddingId::Pkcs1Pss => panic!("Invalid padding for decryption"),
+                PaddingId::Pkcs1Oaep => rsa_key
+                    .decrypt_blinded(&mut rng, rrsa::Oaep::new::<Sha256>(), from)
+                    .map_err(|_| ErrorStack::InvalidPrivateKey)?,
+            };
             let len = m.len();
             to.fill(0);
             to[0..len].copy_from_slice(&m);
@@ -769,6 +778,7 @@ pub mod sign {
                         }
                     }
                 }
+                Padding::PKCS1_OAEP => panic!("Invalid padding for signing"),
             }
         }
     }
@@ -907,6 +917,7 @@ pub mod sign {
                         }
                     }
                 }
+                Padding::PKCS1_OAEP => panic!("Invalid padding for verification"),
             }
         }
 
@@ -981,4 +992,26 @@ fn test_rsa_encrypt_decrypt() {
         .unwrap();
 
     assert_eq!(&recovered_plaintext[0..len2], b"hello");
+}
+
+#[test]
+fn test_rsa_oaep_encrypt_decrypt() {
+    let sk = Rsa::generate(2048).unwrap();
+    let pk = sk.public_key().unwrap();
+
+    let mut ciphertext = [0u8; 256];
+    let mut recovered_plaintext = [0u8; 256];
+
+    let len = pk
+        .public_encrypt(b"hello oaep", &mut ciphertext, Padding::PKCS1_OAEP)
+        .unwrap();
+    let len2 = sk
+        .private_decrypt(
+            &ciphertext[0..len],
+            &mut recovered_plaintext,
+            Padding::PKCS1_OAEP,
+        )
+        .unwrap();
+
+    assert_eq!(&recovered_plaintext[0..len2], b"hello oaep");
 }
