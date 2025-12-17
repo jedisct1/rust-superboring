@@ -12,7 +12,7 @@ keywords = ["boringssl", "crypto", "cryptography", "boring", "rust"]
 readme = "README.md"
 
 [dependencies]
-rrsa = { package = "rsa", version = "0.9.8", optional = true, features = [
+rrsa = { package = "rsa", version = "0.9.9", optional = true, features = [
     "getrandom",
     "hazmat",
     "pem",
