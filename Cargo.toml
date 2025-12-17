@@ -1,7 +1,7 @@
 [package]
 name = "superboring"
 description = "A reimplementation of the 'boring' crate in pure Rust."
-version = "0.1.4"
+version = "0.1.5"
 authors = ["Frank Denis <github@pureftpd.org>"]
 edition = "2021"
 license = "ISC"
