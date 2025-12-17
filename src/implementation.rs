@@ -507,8 +507,8 @@ pub mod aes {
 
     #[derive(Debug)]
     enum AesKeyInner {
-        Aes128(Aes128KeyWrapAligned),
-        Aes256(Aes256KeyWrapAligned),
+        Aes128(Box<Aes128KeyWrapAligned>),
+        Aes256(Box<Aes256KeyWrapAligned>),
     }
 
     #[derive(Debug)]
@@ -523,11 +523,11 @@ pub mod aes {
             let inner = match key.len() {
                 16 => {
                     let key_arr: [u8; 16] = key.try_into().map_err(|_| ErrorStack::KeyError)?;
-                    AesKeyInner::Aes128(Aes128KeyWrapAligned::new(&key_arr))
+                    AesKeyInner::Aes128(Box::new(Aes128KeyWrapAligned::new(&key_arr)))
                 }
                 32 => {
                     let key_arr: [u8; 32] = key.try_into().map_err(|_| ErrorStack::KeyError)?;
-                    AesKeyInner::Aes256(Aes256KeyWrapAligned::new(&key_arr))
+                    AesKeyInner::Aes256(Box::new(Aes256KeyWrapAligned::new(&key_arr)))
                 }
                 _ => return Err(ErrorStack::KeyError),
             };
@@ -1076,8 +1076,8 @@ pub mod symm {
     }
 
     enum AesGcmCipher {
-        Aes128(Aes128Gcm),
-        Aes256(Aes256Gcm),
+        Aes128(Box<Aes128Gcm>),
+        Aes256(Box<Aes256Gcm>),
     }
 
     pub struct Crypter {
@@ -1112,14 +1112,14 @@ pub mod symm {
                         return Err(ErrorStack::KeyError);
                     }
                     let key_arr = GenericArray::from_slice(key);
-                    AesGcmCipher::Aes128(Aes128Gcm::new(key_arr))
+                    AesGcmCipher::Aes128(Box::new(Aes128Gcm::new(key_arr)))
                 }
                 CipherType::Aes256Gcm => {
                     if key.len() != 32 {
                         return Err(ErrorStack::KeyError);
                     }
                     let key_arr = GenericArray::from_slice(key);
-                    AesGcmCipher::Aes256(Aes256Gcm::new(key_arr))
+                    AesGcmCipher::Aes256(Box::new(Aes256Gcm::new(key_arr)))
                 }
             };
 
@@ -1185,11 +1185,7 @@ pub mod symm {
                 if let Some(ptr) = self.output_ptr {
                     let copy_len = self.output_len.min(self.input_buf.len());
                     unsafe {
-                        std::ptr::copy_nonoverlapping(
-                            self.input_buf.as_ptr(),
-                            ptr,
-                            copy_len,
-                        );
+                        std::ptr::copy_nonoverlapping(self.input_buf.as_ptr(), ptr, copy_len);
                     }
                 }
             }
@@ -1307,7 +1303,7 @@ fn test_rsa_oaep_encrypt_decrypt() {
 
 #[test]
 fn test_aes_keywrap_128() {
-    use aes::{wrap_key, unwrap_key, AesKey};
+    use aes::{unwrap_key, wrap_key, AesKey};
 
     let kek = [
         0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E,
@@ -1337,7 +1333,7 @@ fn test_aes_keywrap_128() {
 
 #[test]
 fn test_aes_keywrap_256() {
-    use aes::{wrap_key, unwrap_key, AesKey};
+    use aes::{unwrap_key, wrap_key, AesKey};
 
     let kek = [0x42u8; 32];
     let key_data = b"1234567812345678";
