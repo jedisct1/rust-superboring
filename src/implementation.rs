@@ -95,13 +95,17 @@ pub mod rsa {
             }
         }
 
-        pub fn bits(&self) -> usize {
+        pub fn size(&self) -> u32 {
             let rsa_key = if let RsaKey::Public(x) = &self.rsa_key {
                 x
             } else {
                 unreachable!();
             };
-            rsa_key.size() * 8
+            rsa_key.size() as u32
+        }
+
+        pub fn bits(&self) -> u32 {
+            self.size() * 8
         }
 
         pub fn check_key(&self) -> Result<bool, ErrorStack> {
@@ -278,13 +282,17 @@ pub mod rsa {
             })
         }
 
-        pub fn bits(&self) -> usize {
+        pub fn size(&self) -> u32 {
             let rsa_key = if let RsaKey::Private(x) = &self.rsa_key {
                 x
             } else {
                 unreachable!();
             };
-            rsa_key.size() * 8
+            rsa_key.size() as u32
+        }
+
+        pub fn bits(&self) -> u32 {
+            self.size() * 8
         }
 
         pub fn check_key(&self) -> Result<bool, ErrorStack> {
@@ -464,6 +472,7 @@ pub mod error {
         InvalidPublicKey,
         Overflow,
         UnsupportedModulus,
+        KeyError,
     }
 
     impl std::fmt::Display for ErrorStack {
@@ -474,6 +483,7 @@ pub mod error {
                 ErrorStack::InvalidPublicKey => write!(f, "Invalid public key"),
                 ErrorStack::Overflow => write!(f, "Overflow"),
                 ErrorStack::UnsupportedModulus => write!(f, "Unsupported modulus"),
+                ErrorStack::KeyError => write!(f, "Key error"),
             }
         }
     }
@@ -485,6 +495,89 @@ pub mod error {
     }
 
     impl std::error::Error for ErrorStack {}
+}
+
+#[allow(unused_imports)]
+use aes::*;
+pub mod aes {
+    #[allow(unused_imports)]
+    use super::*;
+
+    use aes_keywrap::{Aes128KeyWrapAligned, Aes256KeyWrapAligned};
+
+    #[derive(Debug)]
+    enum AesKeyInner {
+        Aes128(Aes128KeyWrapAligned),
+        Aes256(Aes256KeyWrapAligned),
+    }
+
+    #[derive(Debug)]
+    pub struct AesKey {
+        inner: AesKeyInner,
+    }
+
+    pub type KeyError = ErrorStack;
+
+    impl AesKey {
+        pub fn new_encrypt(key: &[u8]) -> Result<AesKey, KeyError> {
+            let inner = match key.len() {
+                16 => {
+                    let key_arr: [u8; 16] = key.try_into().map_err(|_| ErrorStack::KeyError)?;
+                    AesKeyInner::Aes128(Aes128KeyWrapAligned::new(&key_arr))
+                }
+                32 => {
+                    let key_arr: [u8; 32] = key.try_into().map_err(|_| ErrorStack::KeyError)?;
+                    AesKeyInner::Aes256(Aes256KeyWrapAligned::new(&key_arr))
+                }
+                _ => return Err(ErrorStack::KeyError),
+            };
+            Ok(AesKey { inner })
+        }
+
+        pub fn new_decrypt(key: &[u8]) -> Result<AesKey, KeyError> {
+            Self::new_encrypt(key)
+        }
+    }
+
+    pub fn wrap_key(
+        key: &AesKey,
+        iv: Option<[u8; 8]>,
+        out: &mut [u8],
+        in_: &[u8],
+    ) -> Result<usize, KeyError> {
+        if iv.is_some() {
+            return Err(ErrorStack::KeyError);
+        }
+        let wrapped = match &key.inner {
+            AesKeyInner::Aes128(k) => k.encapsulate(in_).map_err(|_| ErrorStack::KeyError)?,
+            AesKeyInner::Aes256(k) => k.encapsulate(in_).map_err(|_| ErrorStack::KeyError)?,
+        };
+        if out.len() < wrapped.len() {
+            return Err(ErrorStack::Overflow);
+        }
+        out[..wrapped.len()].copy_from_slice(&wrapped);
+        Ok(wrapped.len())
+    }
+
+    pub fn unwrap_key(
+        key: &AesKey,
+        iv: Option<[u8; 8]>,
+        out: &mut [u8],
+        in_: &[u8],
+    ) -> Result<usize, KeyError> {
+        if iv.is_some() {
+            return Err(ErrorStack::KeyError);
+        }
+        let unwrapped = match &key.inner {
+            AesKeyInner::Aes128(k) => k.decapsulate(in_).map_err(|_| ErrorStack::KeyError)?,
+            AesKeyInner::Aes256(k) => k.decapsulate(in_).map_err(|_| ErrorStack::KeyError)?,
+        };
+        if out.len() < unwrapped.len() {
+            return Err(ErrorStack::Overflow);
+        }
+        out[..unwrapped.len()].copy_from_slice(&unwrapped);
+        Ok(unwrapped.len())
+    }
 }
 
 #[allow(unused_imports)]
@@ -928,6 +1021,202 @@ pub mod sign {
     }
 }
 
+#[allow(unused_imports)]
+use symm::*;
+pub mod symm {
+    use super::*;
+    use aes_gcm::aead::generic_array::GenericArray;
+    use aes_gcm::aead::{AeadInPlace, KeyInit};
+    use aes_gcm::{Aes128Gcm, Aes256Gcm};
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Mode {
+        Encrypt,
+        Decrypt,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum CipherType {
+        Aes128Gcm,
+        Aes256Gcm,
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    pub struct Cipher {
+        cipher_type: CipherType,
+    }
+
+    impl Cipher {
+        pub fn aes_128_gcm() -> Self {
+            Cipher {
+                cipher_type: CipherType::Aes128Gcm,
+            }
+        }
+
+        pub fn aes_256_gcm() -> Self {
+            Cipher {
+                cipher_type: CipherType::Aes256Gcm,
+            }
+        }
+
+        pub fn block_size(&self) -> usize {
+            1
+        }
+
+        pub fn key_len(&self) -> usize {
+            match self.cipher_type {
+                CipherType::Aes128Gcm => 16,
+                CipherType::Aes256Gcm => 32,
+            }
+        }
+
+        pub fn iv_len(&self) -> Option<usize> {
+            Some(12)
+        }
+    }
+
+    enum AesGcmCipher {
+        Aes128(Aes128Gcm),
+        Aes256(Aes256Gcm),
+    }
+
+    pub struct Crypter {
+        cipher: AesGcmCipher,
+        mode: Mode,
+        nonce: [u8; 12],
+        aad: Vec<u8>,
+        input_buf: Vec<u8>,
+        tag: Option<[u8; 16]>,
+        output_tag: Option<[u8; 16]>,
+        output_ptr: Option<*mut u8>,
+        output_len: usize,
+    }
+
+    impl Crypter {
+        pub fn new(
+            cipher: Cipher,
+            mode: Mode,
+            key: &[u8],
+            iv: Option<&[u8]>,
+        ) -> Result<Self, ErrorStack> {
+            let iv = iv.ok_or(ErrorStack::KeyError)?;
+            if iv.len() != 12 {
+                return Err(ErrorStack::KeyError);
+            }
+            let mut nonce = [0u8; 12];
+            nonce.copy_from_slice(iv);
+
+            let aes_cipher = match cipher.cipher_type {
+                CipherType::Aes128Gcm => {
+                    if key.len() != 16 {
+                        return Err(ErrorStack::KeyError);
+                    }
+                    let key_arr = GenericArray::from_slice(key);
+                    AesGcmCipher::Aes128(Aes128Gcm::new(key_arr))
+                }
+                CipherType::Aes256Gcm => {
+                    if key.len() != 32 {
+                        return Err(ErrorStack::KeyError);
+                    }
+                    let key_arr = GenericArray::from_slice(key);
+                    AesGcmCipher::Aes256(Aes256Gcm::new(key_arr))
+                }
+            };
+
+            Ok(Crypter {
+                cipher: aes_cipher,
+                mode,
+                nonce,
+                aad: Vec::new(),
+                input_buf: Vec::new(),
+                tag: None,
+                output_tag: None,
+                output_ptr: None,
+                output_len: 0,
+            })
+        }
+
+        pub fn aad_update(&mut self, aad: &[u8]) -> Result<(), ErrorStack> {
+            self.aad.extend_from_slice(aad);
+            Ok(())
+        }
+
+        pub fn update(&mut self, input: &[u8], output: &mut [u8]) -> Result<usize, ErrorStack> {
+            let nonce = GenericArray::from_slice(&self.nonce);
+
+            match self.mode {
+                Mode::Encrypt => {
+                    self.input_buf = input.to_vec();
+                    let tag = match &self.cipher {
+                        AesGcmCipher::Aes128(c) => c
+                            .encrypt_in_place_detached(nonce, &self.aad, &mut self.input_buf)
+                            .map_err(|_| ErrorStack::KeyError)?,
+                        AesGcmCipher::Aes256(c) => c
+                            .encrypt_in_place_detached(nonce, &self.aad, &mut self.input_buf)
+                            .map_err(|_| ErrorStack::KeyError)?,
+                    };
+                    output[..self.input_buf.len()].copy_from_slice(&self.input_buf);
+                    let mut tag_arr = [0u8; 16];
+                    tag_arr.copy_from_slice(&tag);
+                    self.output_tag = Some(tag_arr);
+                }
+                Mode::Decrypt => {
+                    self.input_buf = input.to_vec();
+                    self.output_ptr = Some(output.as_mut_ptr());
+                    self.output_len = output.len().min(input.len());
+                }
+            }
+            Ok(input.len())
+        }
+
+        pub fn finalize(&mut self, _output: &mut [u8]) -> Result<usize, ErrorStack> {
+            if self.mode == Mode::Decrypt {
+                let nonce = GenericArray::from_slice(&self.nonce);
+                let tag = self.tag.ok_or(ErrorStack::KeyError)?;
+                let tag = GenericArray::from_slice(&tag);
+                match &self.cipher {
+                    AesGcmCipher::Aes128(c) => c
+                        .decrypt_in_place_detached(nonce, &self.aad, &mut self.input_buf, tag)
+                        .map_err(|_| ErrorStack::KeyError)?,
+                    AesGcmCipher::Aes256(c) => c
+                        .decrypt_in_place_detached(nonce, &self.aad, &mut self.input_buf, tag)
+                        .map_err(|_| ErrorStack::KeyError)?,
+                };
+                if let Some(ptr) = self.output_ptr {
+                    let copy_len = self.output_len.min(self.input_buf.len());
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            self.input_buf.as_ptr(),
+                            ptr,
+                            copy_len,
+                        );
+                    }
+                }
+            }
+            Ok(0)
+        }
+
+        pub fn get_tag(&self, tag: &mut [u8]) -> Result<(), ErrorStack> {
+            let output_tag = self.output_tag.ok_or(ErrorStack::KeyError)?;
+            if tag.len() < 16 {
+                return Err(ErrorStack::Overflow);
+            }
+            tag[..16].copy_from_slice(&output_tag);
+            Ok(())
+        }
+
+        pub fn set_tag(&mut self, tag: &[u8]) -> Result<(), ErrorStack> {
+            if tag.len() != 16 {
+                return Err(ErrorStack::KeyError);
+            }
+            let mut tag_arr = [0u8; 16];
+            tag_arr.copy_from_slice(tag);
+            self.tag = Some(tag_arr);
+            Ok(())
+        }
+    }
+}
+
 #[test]
 fn test_rsa_pkcs1() {
     let sk = Rsa::generate(2048).unwrap();
@@ -1014,4 +1303,53 @@ fn test_rsa_oaep_encrypt_decrypt() {
         .unwrap();
 
     assert_eq!(&recovered_plaintext[0..len2], b"hello oaep");
+}
+
+#[test]
+fn test_aes_keywrap_128() {
+    use aes::{wrap_key, unwrap_key, AesKey};
+
+    let kek = [
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E,
+        0x0F,
+    ];
+    let key_data = [
+        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE,
+        0xFF,
+    ];
+    let expected = [
+        0x1F, 0xA6, 0x8B, 0x0A, 0x81, 0x12, 0xB4, 0x47, 0xAE, 0xF3, 0x4B, 0xD8, 0xFB, 0x5A, 0x7B,
+        0x82, 0x9D, 0x3E, 0x86, 0x23, 0x71, 0xD2, 0xCF, 0xE5,
+    ];
+
+    let enc_key = AesKey::new_encrypt(&kek).unwrap();
+    let mut ciphertext = [0u8; 24];
+    let len = wrap_key(&enc_key, None, &mut ciphertext, &key_data).unwrap();
+    assert_eq!(len, 24);
+    assert_eq!(ciphertext, expected);
+
+    let dec_key = AesKey::new_decrypt(&kek).unwrap();
+    let mut plaintext = [0u8; 16];
+    let len = unwrap_key(&dec_key, None, &mut plaintext, &ciphertext).unwrap();
+    assert_eq!(len, 16);
+    assert_eq!(plaintext, key_data);
+}
+
+#[test]
+fn test_aes_keywrap_256() {
+    use aes::{wrap_key, unwrap_key, AesKey};
+
+    let kek = [0x42u8; 32];
+    let key_data = b"1234567812345678";
+
+    let enc_key = AesKey::new_encrypt(&kek).unwrap();
+    let mut ciphertext = [0u8; 24];
+    let len = wrap_key(&enc_key, None, &mut ciphertext, key_data).unwrap();
+    assert_eq!(len, 24);
+
+    let dec_key = AesKey::new_decrypt(&kek).unwrap();
+    let mut plaintext = [0u8; 16];
+    let len = unwrap_key(&dec_key, None, &mut plaintext, &ciphertext).unwrap();
+    assert_eq!(len, 16);
+    assert_eq!(&plaintext, key_data);
 }
