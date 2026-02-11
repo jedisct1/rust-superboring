@@ -23,7 +23,7 @@ rrsa = { package = "rsa", version = "0.9.10", optional = true, features = [
 
 rand = { version = "0.8.5", optional = true }
 hmac-sha256 = { version = "1.1.13", optional = true, features = ["traits010"] }
-hmac-sha512 = { version = "1.1.10", optional = true, features = [
+hmac-sha512 = { version = "1.1.11", optional = true, features = [
     "traits010",
     "sha384",
 ] }
