@@ -3,6 +3,10 @@ use hmac_sha512::sha384::Hash as Sha384;
 use hmac_sha512::Hash as Sha512;
 use std::ffi::c_int;
 
+use hmac_sha256::HMAC as HmacSha256;
+use hmac_sha512::sha384::HMAC as HmacSha384;
+use hmac_sha512::HMAC as HmacSha512;
+
 #[allow(unused_imports)]
 use rrsa::pkcs1::{
     DecodeRsaPrivateKey as _, DecodeRsaPublicKey as _, EncodeRsaPrivateKey as _,
@@ -610,6 +614,32 @@ pub mod bn {
 }
 
 #[allow(unused_imports)]
+use nid::*;
+pub mod nid {
+    use std::ffi::c_int;
+
+    #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+    pub struct Nid(c_int);
+
+    impl Nid {
+        pub fn from_raw(raw: c_int) -> Nid {
+            Nid(raw)
+        }
+
+        pub fn as_raw(&self) -> c_int {
+            self.0
+        }
+
+        pub const UNDEF: Nid = Nid(0);
+        pub const SHA256: Nid = Nid(672);
+        pub const SHA384: Nid = Nid(673);
+        pub const SHA512: Nid = Nid(674);
+        pub const AES_128_GCM: Nid = Nid(895);
+        pub const AES_256_GCM: Nid = Nid(901);
+    }
+}
+
+#[allow(unused_imports)]
 use hash::*;
 pub mod hash {
     #[allow(unused_imports)]
@@ -633,6 +663,68 @@ pub mod hash {
 
         pub fn sha512() -> MessageDigest {
             MessageDigest::Sha512
+        }
+
+        pub fn type_(&self) -> Nid {
+            match self {
+                MessageDigest::Sha256 => Nid::SHA256,
+                MessageDigest::Sha384 => Nid::SHA384,
+                MessageDigest::Sha512 => Nid::SHA512,
+            }
+        }
+
+        pub fn from_nid(type_: Nid) -> Option<MessageDigest> {
+            match type_ {
+                Nid::SHA256 => Some(MessageDigest::Sha256),
+                Nid::SHA384 => Some(MessageDigest::Sha384),
+                Nid::SHA512 => Some(MessageDigest::Sha512),
+                _ => None,
+            }
+        }
+    }
+}
+
+#[allow(unused_imports)]
+use hmac::*;
+pub mod hmac {
+    use super::*;
+
+    enum HmacInner {
+        Sha256(HmacSha256),
+        Sha384(HmacSha384),
+        Sha512(HmacSha512),
+    }
+
+    pub struct Hmac {
+        inner: HmacInner,
+    }
+
+    impl Hmac {
+        pub fn init(key: &[u8], md: &MessageDigest) -> Result<Hmac, ErrorStack> {
+            let inner = match md {
+                MessageDigest::Sha256 => HmacInner::Sha256(HmacSha256::new(key)),
+                MessageDigest::Sha384 => HmacInner::Sha384(HmacSha384::new(key)),
+                MessageDigest::Sha512 => HmacInner::Sha512(HmacSha512::new(key)),
+            };
+            Ok(Hmac { inner })
+        }
+
+        pub fn update(&mut self, data: &[u8]) -> Result<(), ErrorStack> {
+            match &mut self.inner {
+                HmacInner::Sha256(h) => h.update(data),
+                HmacInner::Sha384(h) => h.update(data),
+                HmacInner::Sha512(h) => h.update(data),
+            }
+            Ok(())
+        }
+
+        pub fn finalize(self) -> Result<Vec<u8>, ErrorStack> {
+            let result = match self.inner {
+                HmacInner::Sha256(h) => h.finalize().to_vec(),
+                HmacInner::Sha384(h) => h.finalize().to_vec(),
+                HmacInner::Sha512(h) => h.finalize().to_vec(),
+            };
+            Ok(result)
         }
     }
 }
@@ -751,6 +843,10 @@ pub mod sign {
 
         pub fn rsa_pss_saltlen(&self) -> Result<RsaPssSaltlen, ErrorStack> {
             Ok(self.salt_len)
+        }
+
+        pub fn set_rsa_mgf1_md(&mut self, _md: MessageDigest) -> Result<(), ErrorStack> {
+            Ok(())
         }
 
         pub fn update(&mut self, buf: &[u8]) -> Result<(), ErrorStack> {
@@ -874,6 +970,16 @@ pub mod sign {
                 Padding::PKCS1_OAEP => panic!("Invalid padding for signing"),
             }
         }
+
+        pub fn sign_oneshot(&mut self, sig_buf: &mut [u8], data_buf: &[u8]) -> Result<usize, ErrorStack> {
+            self.update(data_buf)?;
+            self.sign(sig_buf)
+        }
+
+        pub fn sign_oneshot_to_vec(&mut self, data_buf: &[u8]) -> Result<Vec<u8>, ErrorStack> {
+            self.update(data_buf)?;
+            self.sign_to_vec()
+        }
     }
 
     #[derive(Clone)]
@@ -920,6 +1026,10 @@ pub mod sign {
 
         pub fn rsa_pss_saltlen(&self) -> Result<RsaPssSaltlen, ErrorStack> {
             Ok(self.salt_len)
+        }
+
+        pub fn set_rsa_mgf1_md(&mut self, _md: MessageDigest) -> Result<(), ErrorStack> {
+            Ok(())
         }
 
         pub fn update(&mut self, buf: &[u8]) -> Result<(), ErrorStack> {
@@ -1072,6 +1182,13 @@ pub mod symm {
 
         pub fn iv_len(&self) -> Option<usize> {
             Some(12)
+        }
+
+        pub fn nid(&self) -> Nid {
+            match self.cipher_type {
+                CipherType::Aes128Gcm => Nid::AES_128_GCM,
+                CipherType::Aes256Gcm => Nid::AES_256_GCM,
+            }
         }
     }
 
@@ -1348,4 +1465,72 @@ fn test_aes_keywrap_256() {
     let len = unwrap_key(&dec_key, None, &mut plaintext, &ciphertext).unwrap();
     assert_eq!(len, 16);
     assert_eq!(&plaintext, key_data);
+}
+
+#[test]
+fn test_hmac_sha256() {
+    let mut h = hmac::Hmac::init(b"secret key", &MessageDigest::sha256()).unwrap();
+    h.update(b"hello ").unwrap();
+    h.update(b"world").unwrap();
+    let mac = h.finalize().unwrap();
+    assert_eq!(mac.len(), 32);
+
+    let mut h2 = hmac::Hmac::init(b"secret key", &MessageDigest::sha256()).unwrap();
+    h2.update(b"hello world").unwrap();
+    let mac2 = h2.finalize().unwrap();
+    assert_eq!(mac, mac2);
+}
+
+#[test]
+fn test_hmac_sha384() {
+    let mut h = hmac::Hmac::init(b"secret key", &MessageDigest::sha384()).unwrap();
+    h.update(b"hello world").unwrap();
+    let mac = h.finalize().unwrap();
+    assert_eq!(mac.len(), 48);
+}
+
+#[test]
+fn test_hmac_sha512() {
+    let mut h = hmac::Hmac::init(b"secret key", &MessageDigest::sha512()).unwrap();
+    h.update(b"hello ").unwrap();
+    h.update(b"world").unwrap();
+    let mac = h.finalize().unwrap();
+    assert_eq!(mac.len(), 64);
+
+    let mut h2 = hmac::Hmac::init(b"secret key", &MessageDigest::sha512()).unwrap();
+    h2.update(b"hello world").unwrap();
+    let mac2 = h2.finalize().unwrap();
+    assert_eq!(mac, mac2);
+}
+
+#[test]
+fn test_nid_roundtrip() {
+    assert_eq!(MessageDigest::from_nid(Nid::SHA256), Some(MessageDigest::Sha256));
+    assert_eq!(MessageDigest::from_nid(Nid::SHA384), Some(MessageDigest::Sha384));
+    assert_eq!(MessageDigest::from_nid(Nid::SHA512), Some(MessageDigest::Sha512));
+    assert_eq!(MessageDigest::from_nid(Nid::UNDEF), None);
+    assert_eq!(MessageDigest::sha256().type_(), Nid::SHA256);
+}
+
+#[test]
+fn test_cipher_nid() {
+    assert_eq!(symm::Cipher::aes_128_gcm().nid(), Nid::AES_128_GCM);
+    assert_eq!(symm::Cipher::aes_256_gcm().nid(), Nid::AES_256_GCM);
+}
+
+#[test]
+fn test_sign_oneshot() {
+    let sk = Rsa::generate(2048).unwrap();
+    let pk = sk.public_key().unwrap();
+
+    let sk = PKey::from_rsa(sk).unwrap();
+    let pk = PKey::from_rsa(pk).unwrap();
+
+    let mut signer = Signer::new(MessageDigest::Sha256, &sk).unwrap();
+    signer.set_rsa_padding(Padding::PKCS1).unwrap();
+    let signature = signer.sign_oneshot_to_vec(b"hello").unwrap();
+
+    let mut verifier = Verifier::new(MessageDigest::Sha256, &pk).unwrap();
+    verifier.set_rsa_padding(Padding::PKCS1).unwrap();
+    assert!(verifier.verify_oneshot(&signature, b"hello").unwrap());
 }
