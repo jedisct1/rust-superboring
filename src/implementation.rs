@@ -45,12 +45,22 @@ pub mod rsa {
     use super::*;
 
     #[allow(clippy::large_enum_variant)]
-    #[derive(Debug, Clone, PartialEq, Eq, Default)]
+    #[derive(Clone, PartialEq, Eq, Default)]
     pub enum RsaKey {
         #[default]
         None,
         Public(rrsa::RsaPublicKey),
         Private(rrsa::RsaPrivateKey),
+    }
+
+    impl std::fmt::Debug for RsaKey {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                RsaKey::None => write!(f, "RsaKey::None"),
+                RsaKey::Public(_) => write!(f, "RsaKey::Public([redacted])"),
+                RsaKey::Private(_) => write!(f, "RsaKey::Private([redacted])"),
+            }
+        }
     }
 
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -509,10 +519,18 @@ pub mod aes {
 
     use aes_keywrap::{Aes128KeyWrapAligned, Aes256KeyWrapAligned};
 
-    #[derive(Debug)]
     enum AesKeyInner {
         Aes128(Box<Aes128KeyWrapAligned>),
         Aes256(Box<Aes256KeyWrapAligned>),
+    }
+
+    impl std::fmt::Debug for AesKeyInner {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                AesKeyInner::Aes128(_) => write!(f, "Aes128([redacted])"),
+                AesKeyInner::Aes256(_) => write!(f, "Aes256([redacted])"),
+            }
+        }
     }
 
     #[derive(Debug)]
