@@ -45,7 +45,7 @@ pub mod rsa {
     use super::*;
 
     #[allow(clippy::large_enum_variant)]
-    #[derive(Debug, Clone, PartialEq, Eq, Default)]
+    #[derive(Clone, PartialEq, Eq, Default)]
     pub enum RsaKey {
         #[default]
         None,
@@ -53,10 +53,26 @@ pub mod rsa {
         Private(rrsa::RsaPrivateKey),
     }
 
-    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    impl std::fmt::Debug for RsaKey {
+        fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            match self {
+                RsaKey::None => write!(f, "RsaKey::None"),
+                RsaKey::Public(_) => write!(f, "RsaKey::Public"),
+                RsaKey::Private(_) => write!(f, "RsaKey::Private"),
+            }
+        }
+    }
+
+    #[derive(Clone, Default, PartialEq, Eq)]
     pub struct Rsa<T> {
         pub rsa_key: RsaKey,
         pub _marker: std::marker::PhantomData<T>,
+    }
+
+    impl<T> std::fmt::Debug for Rsa<T> {
+        fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            write!(f, "Rsa")
+        }
     }
 
     #[derive(Debug, Default, Copy, Clone, PartialEq, Eq)]
@@ -509,15 +525,28 @@ pub mod aes {
 
     use aes_keywrap::{Aes128KeyWrapAligned, Aes256KeyWrapAligned};
 
-    #[derive(Debug)]
     enum AesKeyInner {
         Aes128(Box<Aes128KeyWrapAligned>),
         Aes256(Box<Aes256KeyWrapAligned>),
     }
 
-    #[derive(Debug)]
+    impl std::fmt::Debug for AesKeyInner {
+        fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            match self {
+                AesKeyInner::Aes128(_) => write!(f, "Aes128"),
+                AesKeyInner::Aes256(_) => write!(f, "Aes256"),
+            }
+        }
+    }
+
     pub struct AesKey {
         inner: AesKeyInner,
+    }
+
+    impl std::fmt::Debug for AesKey {
+        fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            write!(f, "AesKey")
+        }
     }
 
     pub type KeyError = ErrorStack;
@@ -590,9 +619,15 @@ pub mod bn {
     #[allow(unused_imports)]
     use super::*;
 
-    #[derive(Debug, Clone, PartialEq, Eq)]
+    #[derive(Clone, PartialEq, Eq)]
     pub struct BigNum {
         pub rsa_bn: rrsa::BigUint,
+    }
+
+    impl std::fmt::Debug for BigNum {
+        fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            write!(f, "BigNum")
+        }
     }
 
     pub type BigNumRef<'a> = BigNum;
@@ -750,11 +785,20 @@ pub mod pkey {
     impl HasPrivate for Private {}
 
     #[allow(clippy::large_enum_variant)]
-    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    #[derive(Clone, Default, PartialEq, Eq)]
     pub enum PKey<T> {
         #[default]
         None,
         Rsa(Rsa<T>),
+    }
+
+    impl<T> std::fmt::Debug for PKey<T> {
+        fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            match self {
+                PKey::None => f.debug_struct("PKey").finish(),
+                PKey::Rsa(_) => f.debug_struct("PKey").field("algorithm", &"RSA").finish(),
+            }
+        }
     }
 
     impl<T> PKey<T> {
