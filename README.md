@@ -35,6 +35,8 @@ cargo zigbuild --target=x86_64-unknown-linux-musl
 ## What is currently implemented?
 
 - RSA operations: key generation (2048/3072/4096 bits), import/export (DER/PEM, PKCS1/PKCS8), encryption/decryption (PKCS1v15 and OAEP), signatures (PKCS1v15 and PSS with SHA-256/384/512)
+- ML-DSA post-quantum signatures: ML-DSA-44, ML-DSA-65 and ML-DSA-87, with key generation from random or seed, signing and verification
 - AES key wrap: RFC 3394 key wrapping with AES-128 and AES-256
-- AES-GCM: authenticated encryption with AES-128-GCM and AES-256-GCM
+- AES-GCM: authenticated encryption with AES-128-GCM and AES-256-GCM, with streaming support and additional authenticated data
 - Hash functions: SHA-256, SHA-384, SHA-512 (via `MessageDigest`)
+- HMAC: HMAC-SHA-256, HMAC-SHA-384, HMAC-SHA-512
