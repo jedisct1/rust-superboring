@@ -1385,8 +1385,8 @@ pub mod mldsa {
     use super::*;
     use ml_dsa::KeyGen as _;
 
-    pub const SEED_BYTES: usize = 32;
-    pub type MlDsaSeed = [u8; SEED_BYTES];
+    pub const PRIVATE_KEY_SEED_BYTES: usize = 32;
+    pub type MlDsaPrivateKeySeed = [u8; PRIVATE_KEY_SEED_BYTES];
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum Algorithm {
@@ -1415,12 +1415,14 @@ pub mod mldsa {
         }
     }
 
+    #[derive(Clone)]
     enum VerifyingKeyInner {
         MlDsa44(Box<ml_dsa::VerifyingKey<ml_dsa::MlDsa44>>),
         MlDsa65(Box<ml_dsa::VerifyingKey<ml_dsa::MlDsa65>>),
         MlDsa87(Box<ml_dsa::VerifyingKey<ml_dsa::MlDsa87>>),
     }
 
+    #[derive(Clone)]
     pub struct MlDsaPublicKey {
         algorithm: Algorithm,
         inner: VerifyingKeyInner,
@@ -1450,6 +1452,14 @@ pub mod mldsa {
 
         pub fn algorithm(&self) -> Algorithm {
             self.algorithm
+        }
+
+        pub fn to_bytes(&self) -> Vec<u8> {
+            match &self.inner {
+                VerifyingKeyInner::MlDsa44(vk) => vk.encode().to_vec(),
+                VerifyingKeyInner::MlDsa65(vk) => vk.encode().to_vec(),
+                VerifyingKeyInner::MlDsa87(vk) => vk.encode().to_vec(),
+            }
         }
 
         pub fn verify(&self, msg: &[u8], signature: &[u8]) -> Result<(), ErrorStack> {
@@ -1494,7 +1504,7 @@ pub mod mldsa {
 
     pub struct MlDsaPrivateKey {
         algorithm: Algorithm,
-        seed: MlDsaSeed,
+        seed: MlDsaPrivateKeySeed,
         inner: SigningKeyInner,
     }
 
@@ -1526,7 +1536,7 @@ pub mod mldsa {
             Ok((pubkey, privkey))
         }
 
-        pub fn from_seed(algorithm: Algorithm, seed: &MlDsaSeed) -> Result<Self, ErrorStack> {
+        pub fn from_seed(algorithm: Algorithm, seed: &MlDsaPrivateKeySeed) -> Result<Self, ErrorStack> {
             let b32 = ml_dsa::B32::from(*seed);
             let (inner, actual_seed) = match algorithm {
                 Algorithm::MlDsa44 => {
@@ -1556,7 +1566,7 @@ pub mod mldsa {
             self.algorithm
         }
 
-        pub fn seed(&self) -> &MlDsaSeed {
+        pub fn seed(&self) -> &MlDsaPrivateKeySeed {
             &self.seed
         }
 
@@ -1841,7 +1851,7 @@ fn test_mldsa_sign_verify_87() {
 
 #[test]
 fn test_mldsa_from_seed() {
-    let seed: MlDsaSeed = [0x42; 32];
+    let seed: MlDsaPrivateKeySeed = [0x42; 32];
     let sk1 = MlDsaPrivateKey::from_seed(Algorithm::MlDsa65, &seed).unwrap();
     let sk2 = MlDsaPrivateKey::from_seed(Algorithm::MlDsa65, &seed).unwrap();
 
@@ -1890,21 +1900,16 @@ fn test_mldsa_verify_wrong_message() {
 }
 
 #[test]
-fn test_mldsa_public_key_from_bytes_valid() {
-    use ml_dsa::{KeyGen as _, MlDsa65};
+fn test_mldsa_public_key_bytes_roundtrip() {
+    let (pk, sk) = MlDsaPrivateKey::generate(Algorithm::MlDsa65).unwrap();
+    let sig = sk.sign(b"roundtrip test").unwrap();
 
-    let seed = [0xAB; 32];
-    let sk = MlDsaPrivateKey::from_seed(Algorithm::MlDsa65, &seed).unwrap();
-    let sig = sk.sign(b"from_bytes test").unwrap();
+    let pk_bytes = pk.to_bytes();
+    assert_eq!(pk_bytes.len(), Algorithm::MlDsa65.public_key_bytes());
 
-    let b32 = ml_dsa::B32::from(seed);
-    let raw_sk = MlDsa65::from_seed(&b32);
-    let vk = ml_dsa::signature::Keypair::verifying_key(&raw_sk);
-    let pk_bytes = vk.encode();
-
-    let pk = MlDsaPublicKey::from_bytes(Algorithm::MlDsa65, &pk_bytes).unwrap();
-    assert_eq!(pk.algorithm(), Algorithm::MlDsa65);
-    pk.verify(b"from_bytes test", &sig).unwrap();
+    let pk2 = MlDsaPublicKey::from_bytes(Algorithm::MlDsa65, &pk_bytes).unwrap();
+    assert_eq!(pk2.algorithm(), Algorithm::MlDsa65);
+    pk2.verify(b"roundtrip test", &sig).unwrap();
 }
 
 #[test]
