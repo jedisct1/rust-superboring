@@ -1383,7 +1383,6 @@ pub mod symm {
 use mldsa::*;
 pub mod mldsa {
     use super::*;
-    use ml_dsa::KeyGen as _;
 
     pub const PRIVATE_KEY_SEED_BYTES: usize = 32;
     pub type MlDsaPrivateKeySeed = [u8; PRIVATE_KEY_SEED_BYTES];
@@ -1518,7 +1517,38 @@ pub mod mldsa {
             let privkey = Self::from_seed(algorithm, &seed);
             seed.fill(0);
             let privkey = privkey?;
-            let vk = match &privkey.inner {
+            let pubkey = privkey.public_key();
+            Ok((pubkey, privkey))
+        }
+
+        pub fn from_seed(algorithm: Algorithm, seed: &MlDsaPrivateKeySeed) -> Result<Self, ErrorStack> {
+            let b32 = ml_dsa::B32::from(*seed);
+            let (inner, actual_seed) = match algorithm {
+                Algorithm::MlDsa44 => {
+                    let sk = ml_dsa::SigningKey::<ml_dsa::MlDsa44>::from_seed(&b32);
+                    let s: [u8; 32] = sk.to_seed().into();
+                    (SigningKeyInner::MlDsa44(Box::new(sk)), s)
+                }
+                Algorithm::MlDsa65 => {
+                    let sk = ml_dsa::SigningKey::<ml_dsa::MlDsa65>::from_seed(&b32);
+                    let s: [u8; 32] = sk.to_seed().into();
+                    (SigningKeyInner::MlDsa65(Box::new(sk)), s)
+                }
+                Algorithm::MlDsa87 => {
+                    let sk = ml_dsa::SigningKey::<ml_dsa::MlDsa87>::from_seed(&b32);
+                    let s: [u8; 32] = sk.to_seed().into();
+                    (SigningKeyInner::MlDsa87(Box::new(sk)), s)
+                }
+            };
+            Ok(MlDsaPrivateKey {
+                algorithm,
+                seed: actual_seed,
+                inner,
+            })
+        }
+
+        pub fn public_key(&self) -> MlDsaPublicKey {
+            let inner = match &self.inner {
                 SigningKeyInner::MlDsa44(sk) => VerifyingKeyInner::MlDsa44(Box::new(
                     ml_dsa::signature::Keypair::verifying_key(sk.as_ref()),
                 )),
@@ -1529,37 +1559,10 @@ pub mod mldsa {
                     ml_dsa::signature::Keypair::verifying_key(sk.as_ref()),
                 )),
             };
-            let pubkey = MlDsaPublicKey {
-                algorithm,
-                inner: vk,
-            };
-            Ok((pubkey, privkey))
-        }
-
-        pub fn from_seed(algorithm: Algorithm, seed: &MlDsaPrivateKeySeed) -> Result<Self, ErrorStack> {
-            let b32 = ml_dsa::B32::from(*seed);
-            let (inner, actual_seed) = match algorithm {
-                Algorithm::MlDsa44 => {
-                    let sk = ml_dsa::MlDsa44::from_seed(&b32);
-                    let s: [u8; 32] = sk.to_seed().into();
-                    (SigningKeyInner::MlDsa44(Box::new(sk)), s)
-                }
-                Algorithm::MlDsa65 => {
-                    let sk = ml_dsa::MlDsa65::from_seed(&b32);
-                    let s: [u8; 32] = sk.to_seed().into();
-                    (SigningKeyInner::MlDsa65(Box::new(sk)), s)
-                }
-                Algorithm::MlDsa87 => {
-                    let sk = ml_dsa::MlDsa87::from_seed(&b32);
-                    let s: [u8; 32] = sk.to_seed().into();
-                    (SigningKeyInner::MlDsa87(Box::new(sk)), s)
-                }
-            };
-            Ok(MlDsaPrivateKey {
-                algorithm,
-                seed: actual_seed,
+            MlDsaPublicKey {
+                algorithm: self.algorithm,
                 inner,
-            })
+            }
         }
 
         pub fn algorithm(&self) -> Algorithm {
@@ -1573,19 +1576,19 @@ pub mod mldsa {
         pub fn sign(&self, msg: &[u8]) -> Result<Vec<u8>, ErrorStack> {
             let sig_bytes = match &self.inner {
                 SigningKeyInner::MlDsa44(sk) => sk
-                    .signing_key()
+                    .expanded_key()
                     .sign_deterministic(msg, &[])
                     .map_err(|_| ErrorStack::InternalError)?
                     .encode()
                     .to_vec(),
                 SigningKeyInner::MlDsa65(sk) => sk
-                    .signing_key()
+                    .expanded_key()
                     .sign_deterministic(msg, &[])
                     .map_err(|_| ErrorStack::InternalError)?
                     .encode()
                     .to_vec(),
                 SigningKeyInner::MlDsa87(sk) => sk
-                    .signing_key()
+                    .expanded_key()
                     .sign_deterministic(msg, &[])
                     .map_err(|_| ErrorStack::InternalError)?
                     .encode()
