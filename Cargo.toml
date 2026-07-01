@@ -10,6 +10,7 @@ homepage = "https://github.com/jedisct1/rust-superboring"
 categories = ["wasm", "api-bindings", "cryptography"]
 keywords = ["boringssl", "crypto", "cryptography", "boring", "rust"]
 readme = "README.md"
+include = ["src/**/*.rs", "README.md", "LICENSE"]
 
 [dependencies]
 rrsa = { package = "rsa", version = "0.9.10", optional = true, features = [
