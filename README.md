@@ -40,3 +40,11 @@ cargo zigbuild --target=x86_64-unknown-linux-musl
 - AES-GCM: authenticated encryption with AES-128-GCM and AES-256-GCM, with streaming support and additional authenticated data
 - Hash functions: SHA-256, SHA-384, SHA-512 (via `MessageDigest`)
 - HMAC: HMAC-SHA-256, HMAC-SHA-384, HMAC-SHA-512
+
+## WASI-Crypto
+
+When compiling for `wasm32-wasip1`, the optional `wasi-crypto` feature uses the WASI-Crypto host extension through the `wasi-crypto-guest` crate for supported operations. With WasmEdge's `wasi_crypto` plugin, this currently accelerates RSA key generation/signing/verification for the plugin's supported RSA signature algorithms, AES-128-GCM, AES-256-GCM, HMAC-SHA-256 and HMAC-SHA-512. Operations not exposed by the plugin, such as AES key wrap, RSA encryption/OAEP, HMAC-SHA-384 and ML-DSA, keep using the Rust implementations.
+
+```sh
+cargo test --target wasm32-wasip1 --features wasi-crypto
+```

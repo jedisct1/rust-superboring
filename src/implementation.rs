@@ -29,6 +29,279 @@ use rrsa::traits::{
     PublicKeyParts as _, RandomizedDecryptor as _, RandomizedEncryptor as _, SignatureScheme as _,
 };
 
+#[cfg(all(
+    feature = "wasi-crypto",
+    target_arch = "wasm32",
+    target_os = "wasi",
+    target_env = "p1"
+))]
+mod wasi_crypto {
+    use rrsa::pkcs1::DecodeRsaPrivateKey as _;
+    use rrsa::pkcs8::{DecodePrivateKey as _, EncodePrivateKey as _, EncodePublicKey as _};
+    use wasi_crypto_guest::error::Error as WasiCryptoError;
+    use wasi_crypto_guest::signatures::{Signature, SignatureKeyPair, SignaturePublicKey};
+    use wasi_crypto_guest::symmetric::{AeadKey, Auth, AuthKey, SymmetricOptions, SymmetricState};
+
+    use super::*;
+
+    pub type WasiAeadKey = AeadKey;
+    pub type WasiAuth = Auth;
+
+    fn is_required_rsa_signature_algorithm(alg: &str) -> bool {
+        matches!(
+            alg,
+            "RSA_PKCS1_2048_SHA256" | "RSA_PKCS1_3072_SHA384" | "RSA_PKCS1_4096_SHA512"
+        )
+    }
+
+    fn operation_may_fallback(error: WasiCryptoError) -> bool {
+        matches!(
+            error,
+            WasiCryptoError::NotImplemented
+                | WasiCryptoError::UnsupportedEncoding
+                | WasiCryptoError::UnsupportedFeature
+                | WasiCryptoError::UnsupportedOption
+        )
+    }
+
+    fn rsa_may_fallback(alg: &str, error: WasiCryptoError) -> bool {
+        operation_may_fallback(error)
+            || (!is_required_rsa_signature_algorithm(alg)
+                && matches!(error, WasiCryptoError::UnsupportedAlgorithm))
+    }
+
+    fn map_error(error: WasiCryptoError) -> ErrorStack {
+        match error {
+            WasiCryptoError::InvalidKey
+            | WasiCryptoError::InvalidLength
+            | WasiCryptoError::InvalidOperation
+            | WasiCryptoError::InvalidTag
+            | WasiCryptoError::InvalidNonce
+            | WasiCryptoError::KeyRequired
+            | WasiCryptoError::KeyNotSupported
+            | WasiCryptoError::UnsupportedAlgorithm
+            | WasiCryptoError::UnsupportedEncoding
+            | WasiCryptoError::UnsupportedFeature
+            | WasiCryptoError::UnsupportedOption => ErrorStack::KeyError,
+            WasiCryptoError::Overflow => ErrorStack::Overflow,
+            _ => ErrorStack::InternalError,
+        }
+    }
+
+    pub fn auth_new(alg: &'static str, key: &[u8]) -> Result<WasiAuth, ErrorStack> {
+        let key = match AuthKey::from_raw(alg, key) {
+            Ok(key) => key,
+            Err(error) => return Err(map_error(error)),
+        };
+        match Auth::new(&key) {
+            Ok(auth) => Ok(auth),
+            Err(error) => Err(map_error(error)),
+        }
+    }
+
+    pub fn auth_absorb(auth: &mut WasiAuth, data: &[u8]) -> Result<(), ErrorStack> {
+        match auth.absorb(data) {
+            Ok(()) => Ok(()),
+            Err(error) => Err(map_error(error)),
+        }
+    }
+
+    pub fn auth_tag(auth: &mut WasiAuth) -> Result<Vec<u8>, ErrorStack> {
+        match auth.tag() {
+            Ok(tag) => Ok(tag),
+            Err(error) => Err(map_error(error)),
+        }
+    }
+
+    pub fn hmac_alg(md: &MessageDigest) -> Option<&'static str> {
+        match md {
+            MessageDigest::Sha256 => Some("HMAC/SHA-256"),
+            MessageDigest::Sha384 => None,
+            MessageDigest::Sha512 => Some("HMAC/SHA-512"),
+        }
+    }
+
+    pub fn aead_key(alg: &'static str, key: &[u8]) -> Result<WasiAeadKey, ErrorStack> {
+        match AeadKey::from_raw(alg, key) {
+            Ok(key) => Ok(key),
+            Err(error) => Err(map_error(error)),
+        }
+    }
+
+    fn aead_state(
+        key: &WasiAeadKey,
+        nonce: &[u8; 12],
+        aad: &[u8],
+    ) -> Result<SymmetricState, ErrorStack> {
+        let mut options = SymmetricOptions::new();
+        options.set("nonce", nonce).map_err(map_error)?;
+        let mut state = match SymmetricState::new(key.alg, Some(key), Some(&options)) {
+            Ok(state) => state,
+            Err(error) => return Err(map_error(error)),
+        };
+        match state.absorb(aad) {
+            Ok(()) => Ok(state),
+            Err(error) => Err(map_error(error)),
+        }
+    }
+
+    pub fn aead_encrypt_detached(
+        key: &WasiAeadKey,
+        nonce: &[u8; 12],
+        aad: &[u8],
+        out: &mut [u8],
+        plaintext: &[u8],
+    ) -> Result<[u8; 16], ErrorStack> {
+        let mut state = aead_state(key, nonce, aad)?;
+        let tag = match state.encrypt_detached(out, plaintext) {
+            Ok(tag) => tag,
+            Err(error) => return Err(map_error(error)),
+        };
+        let tag: [u8; 16] = tag.try_into().map_err(|_| ErrorStack::KeyError)?;
+        Ok(tag)
+    }
+
+    pub fn aead_decrypt_detached(
+        key: &WasiAeadKey,
+        nonce: &[u8; 12],
+        aad: &[u8],
+        out: &mut [u8],
+        ciphertext: &[u8],
+        tag: &[u8; 16],
+    ) -> Result<(), ErrorStack> {
+        let mut state = aead_state(key, nonce, aad)?;
+        match state.decrypt_detached(out, ciphertext, tag) {
+            Ok(()) => Ok(()),
+            Err(error) => Err(map_error(error)),
+        }
+    }
+
+    fn rsa_generate_alg(bits: u32) -> Result<&'static str, ErrorStack> {
+        match bits {
+            2048 => Ok("RSA_PKCS1_2048_SHA256"),
+            3072 => Ok("RSA_PKCS1_3072_SHA384"),
+            4096 => Ok("RSA_PKCS1_4096_SHA512"),
+            _ => Err(ErrorStack::UnsupportedModulus),
+        }
+    }
+
+    fn rsa_signature_alg(
+        bits: usize,
+        padding: Padding,
+        md: &MessageDigest,
+        salt_len: RsaPssSaltlen,
+    ) -> Option<&'static str> {
+        let prefix = match padding {
+            Padding::PKCS1 => "RSA_PKCS1",
+            Padding::PKCS1_PSS if salt_len.len == RsaPssSaltlen::DIGEST_LENGTH.len => "RSA_PSS",
+            _ => return None,
+        };
+        match (prefix, bits, md) {
+            ("RSA_PKCS1", 2048, MessageDigest::Sha256) => Some("RSA_PKCS1_2048_SHA256"),
+            ("RSA_PKCS1", 2048, MessageDigest::Sha384) => Some("RSA_PKCS1_2048_SHA384"),
+            ("RSA_PKCS1", 2048, MessageDigest::Sha512) => Some("RSA_PKCS1_2048_SHA512"),
+            ("RSA_PKCS1", 3072, MessageDigest::Sha384) => Some("RSA_PKCS1_3072_SHA384"),
+            ("RSA_PKCS1", 3072, MessageDigest::Sha512) => Some("RSA_PKCS1_3072_SHA512"),
+            ("RSA_PKCS1", 4096, MessageDigest::Sha512) => Some("RSA_PKCS1_4096_SHA512"),
+            ("RSA_PSS", 2048, MessageDigest::Sha256) => Some("RSA_PSS_2048_SHA256"),
+            ("RSA_PSS", 2048, MessageDigest::Sha384) => Some("RSA_PSS_2048_SHA384"),
+            ("RSA_PSS", 2048, MessageDigest::Sha512) => Some("RSA_PSS_2048_SHA512"),
+            ("RSA_PSS", 3072, MessageDigest::Sha384) => Some("RSA_PSS_3072_SHA384"),
+            ("RSA_PSS", 3072, MessageDigest::Sha512) => Some("RSA_PSS_3072_SHA512"),
+            ("RSA_PSS", 4096, MessageDigest::Sha512) => Some("RSA_PSS_4096_SHA512"),
+            _ => None,
+        }
+    }
+
+    pub fn rsa_generate(bits: u32) -> Result<Option<rrsa::RsaPrivateKey>, ErrorStack> {
+        let alg = rsa_generate_alg(bits)?;
+        let keypair = match SignatureKeyPair::generate(alg) {
+            Ok(keypair) => keypair,
+            Err(error) if rsa_may_fallback(alg, error) => return Ok(None),
+            Err(error) => return Err(map_error(error)),
+        };
+        let der = match keypair.pkcs8() {
+            Ok(der) => der,
+            Err(error) if rsa_may_fallback(alg, error) => return Ok(None),
+            Err(error) => return Err(map_error(error)),
+        };
+        let mut rsa_key = rrsa::RsaPrivateKey::from_pkcs8_der(&der)
+            .or_else(|_| rrsa::RsaPrivateKey::from_pkcs1_der(&der))
+            .map_err(|_| ErrorStack::InvalidPrivateKey)?;
+        rsa_key
+            .precompute()
+            .map_err(|_| ErrorStack::InvalidPrivateKey)?;
+        Ok(Some(rsa_key))
+    }
+
+    pub fn rsa_sign(
+        rsa_key: &rrsa::RsaPrivateKey,
+        padding: Padding,
+        md: &MessageDigest,
+        salt_len: RsaPssSaltlen,
+        msg: &[u8],
+    ) -> Result<Option<Vec<u8>>, ErrorStack> {
+        let Some(alg) = rsa_signature_alg(rsa_key.size() * 8, padding, md, salt_len) else {
+            return Ok(None);
+        };
+        let der = match rsa_key.to_pkcs8_der() {
+            Ok(der) => der.as_bytes().to_vec(),
+            Err(_) => return Err(ErrorStack::InvalidPrivateKey),
+        };
+        let keypair = match SignatureKeyPair::from_pkcs8(alg, der) {
+            Ok(keypair) => keypair,
+            Err(error) if rsa_may_fallback(alg, error) => return Ok(None),
+            Err(error) => return Err(map_error(error)),
+        };
+        let signature = match keypair.sign(msg) {
+            Ok(signature) => signature,
+            Err(error) if rsa_may_fallback(alg, error) => return Ok(None),
+            Err(error) => return Err(map_error(error)),
+        };
+        match signature.raw() {
+            Ok(raw) => Ok(Some(raw)),
+            Err(error) if rsa_may_fallback(alg, error) => Ok(None),
+            Err(error) => Err(map_error(error)),
+        }
+    }
+
+    pub fn rsa_verify(
+        rsa_key: &rrsa::RsaPublicKey,
+        padding: Padding,
+        md: &MessageDigest,
+        salt_len: RsaPssSaltlen,
+        msg: &[u8],
+        signature: &[u8],
+    ) -> Result<Option<bool>, ErrorStack> {
+        let Some(alg) = rsa_signature_alg(rsa_key.size() * 8, padding, md, salt_len) else {
+            return Ok(None);
+        };
+        let der = match rsa_key.to_public_key_der() {
+            Ok(der) => der.into_vec(),
+            Err(_) => return Err(ErrorStack::InvalidPublicKey),
+        };
+        let public_key = match SignaturePublicKey::from_pkcs8(alg, der) {
+            Ok(public_key) => public_key,
+            Err(error) if rsa_may_fallback(alg, error) => return Ok(None),
+            Err(error) => return Err(map_error(error)),
+        };
+        let signature = match Signature::from_raw(alg, signature) {
+            Ok(signature) => signature,
+            Err(WasiCryptoError::InvalidSignature) => return Ok(Some(false)),
+            Err(error) if rsa_may_fallback(alg, error) => return Ok(None),
+            Err(error) => return Err(map_error(error)),
+        };
+        match public_key.signature_verify(msg, &signature) {
+            Ok(()) => Ok(Some(true)),
+            Err(WasiCryptoError::VerificationFailed | WasiCryptoError::InvalidSignature) => {
+                Ok(Some(false))
+            }
+            Err(error) if rsa_may_fallback(alg, error) => Ok(None),
+            Err(error) => Err(map_error(error)),
+        }
+    }
+}
+
 pub mod reexports {
     pub use hmac_sha256;
     pub use hmac_sha512;
@@ -293,9 +566,30 @@ pub mod rsa {
                 2048 | 3072 | 4096 => {}
                 _ => return Err(ErrorStack::UnsupportedModulus),
             };
-            let mut rng = rand::thread_rng();
-            let rsa_key = rrsa::RsaPrivateKey::new(&mut rng, bits as _)
-                .map_err(|_| ErrorStack::InternalError)?;
+            #[cfg(not(all(
+                feature = "wasi-crypto",
+                target_arch = "wasm32",
+                target_os = "wasi",
+                target_env = "p1"
+            )))]
+            let rsa_key = {
+                let mut rng = rand::thread_rng();
+                rrsa::RsaPrivateKey::new(&mut rng, bits as _)
+                    .map_err(|_| ErrorStack::InternalError)?
+            };
+            #[cfg(all(
+                feature = "wasi-crypto",
+                target_arch = "wasm32",
+                target_os = "wasi",
+                target_env = "p1"
+            ))]
+            let rsa_key = if let Some(rsa_key) = wasi_crypto::rsa_generate(bits)? {
+                rsa_key
+            } else {
+                let mut rng = rand::thread_rng();
+                rrsa::RsaPrivateKey::new(&mut rng, bits as _)
+                    .map_err(|_| ErrorStack::InternalError)?
+            };
             let rsa_key = RsaKey::Private(rsa_key);
             Ok(Rsa {
                 rsa_key,
@@ -729,6 +1023,20 @@ pub mod hmac {
         Sha256(HmacSha256),
         Sha384(HmacSha384),
         Sha512(HmacSha512),
+        #[cfg(all(
+            feature = "wasi-crypto",
+            target_arch = "wasm32",
+            target_os = "wasi",
+            target_env = "p1"
+        ))]
+        WasiSha256(wasi_crypto::WasiAuth),
+        #[cfg(all(
+            feature = "wasi-crypto",
+            target_arch = "wasm32",
+            target_os = "wasi",
+            target_env = "p1"
+        ))]
+        WasiSha512(wasi_crypto::WasiAuth),
     }
 
     pub struct Hmac {
@@ -737,6 +1045,21 @@ pub mod hmac {
 
     impl Hmac {
         pub fn init(key: &[u8], md: &MessageDigest) -> Result<Hmac, ErrorStack> {
+            #[cfg(all(
+                feature = "wasi-crypto",
+                target_arch = "wasm32",
+                target_os = "wasi",
+                target_env = "p1"
+            ))]
+            if let Some(alg) = wasi_crypto::hmac_alg(md) {
+                let auth = wasi_crypto::auth_new(alg, key)?;
+                let inner = match md {
+                    MessageDigest::Sha256 => HmacInner::WasiSha256(auth),
+                    MessageDigest::Sha384 => unreachable!(),
+                    MessageDigest::Sha512 => HmacInner::WasiSha512(auth),
+                };
+                return Ok(Hmac { inner });
+            }
             let inner = match md {
                 MessageDigest::Sha256 => HmacInner::Sha256(HmacSha256::new(key)),
                 MessageDigest::Sha384 => HmacInner::Sha384(HmacSha384::new(key)),
@@ -750,6 +1073,20 @@ pub mod hmac {
                 HmacInner::Sha256(h) => h.update(data),
                 HmacInner::Sha384(h) => h.update(data),
                 HmacInner::Sha512(h) => h.update(data),
+                #[cfg(all(
+                    feature = "wasi-crypto",
+                    target_arch = "wasm32",
+                    target_os = "wasi",
+                    target_env = "p1"
+                ))]
+                HmacInner::WasiSha256(h) => wasi_crypto::auth_absorb(h, data)?,
+                #[cfg(all(
+                    feature = "wasi-crypto",
+                    target_arch = "wasm32",
+                    target_os = "wasi",
+                    target_env = "p1"
+                ))]
+                HmacInner::WasiSha512(h) => wasi_crypto::auth_absorb(h, data)?,
             }
             Ok(())
         }
@@ -759,6 +1096,20 @@ pub mod hmac {
                 HmacInner::Sha256(h) => h.finalize().to_vec(),
                 HmacInner::Sha384(h) => h.finalize().to_vec(),
                 HmacInner::Sha512(h) => h.finalize().to_vec(),
+                #[cfg(all(
+                    feature = "wasi-crypto",
+                    target_arch = "wasm32",
+                    target_os = "wasi",
+                    target_env = "p1"
+                ))]
+                HmacInner::WasiSha256(mut h) => wasi_crypto::auth_tag(&mut h)?,
+                #[cfg(all(
+                    feature = "wasi-crypto",
+                    target_arch = "wasm32",
+                    target_os = "wasi",
+                    target_env = "p1"
+                ))]
+                HmacInner::WasiSha512(mut h) => wasi_crypto::auth_tag(&mut h)?,
             };
             Ok(result)
         }
@@ -851,6 +1202,13 @@ pub mod sign {
         pub padding: Padding,
         pub salt_len: RsaPssSaltlen,
         pub any_hash: AnyHash,
+        #[cfg(all(
+            feature = "wasi-crypto",
+            target_arch = "wasm32",
+            target_os = "wasi",
+            target_env = "p1"
+        ))]
+        pub wasi_buf: Vec<u8>,
     }
 
     impl<'t, T> Signer<'t, T> {
@@ -869,6 +1227,13 @@ pub mod sign {
                 padding: Padding::NONE,
                 salt_len: RsaPssSaltlen::default(),
                 any_hash,
+                #[cfg(all(
+                    feature = "wasi-crypto",
+                    target_arch = "wasm32",
+                    target_os = "wasi",
+                    target_env = "p1"
+                ))]
+                wasi_buf: Vec::new(),
             })
         }
 
@@ -895,6 +1260,13 @@ pub mod sign {
         }
 
         pub fn update(&mut self, buf: &[u8]) -> Result<(), ErrorStack> {
+            #[cfg(all(
+                feature = "wasi-crypto",
+                target_arch = "wasm32",
+                target_os = "wasi",
+                target_env = "p1"
+            ))]
+            self.wasi_buf.extend_from_slice(buf);
             match &mut self.any_hash {
                 AnyHash::None => unreachable!("AnyHash::None"),
                 AnyHash::Sha256(x) => x.update(buf),
@@ -924,7 +1296,7 @@ pub mod sign {
             if buf.len() < sig.len() {
                 return Err(ErrorStack::Overflow);
             }
-            buf.copy_from_slice(&sig);
+            buf[..sig.len()].copy_from_slice(&sig);
             Ok(sig.len())
         }
 
@@ -939,6 +1311,21 @@ pub mod sign {
             } else {
                 unreachable!();
             };
+            #[cfg(all(
+                feature = "wasi-crypto",
+                target_arch = "wasm32",
+                target_os = "wasi",
+                target_env = "p1"
+            ))]
+            if let Some(sig) = wasi_crypto::rsa_sign(
+                rsa_key,
+                self.padding,
+                &self.message_digest,
+                self.salt_len,
+                &self.wasi_buf,
+            )? {
+                return Ok(sig);
+            }
             let mut rng = rand::thread_rng();
             let rsa_key = rsa_key.clone();
             match self.padding {
@@ -1038,6 +1425,13 @@ pub mod sign {
         pub padding: Padding,
         pub salt_len: RsaPssSaltlen,
         pub any_hash: AnyHash,
+        #[cfg(all(
+            feature = "wasi-crypto",
+            target_arch = "wasm32",
+            target_os = "wasi",
+            target_env = "p1"
+        ))]
+        pub wasi_buf: Vec<u8>,
     }
 
     impl<'t, T> Verifier<'t, T> {
@@ -1056,6 +1450,13 @@ pub mod sign {
                 padding: Padding::NONE,
                 salt_len: RsaPssSaltlen::default(),
                 any_hash,
+                #[cfg(all(
+                    feature = "wasi-crypto",
+                    target_arch = "wasm32",
+                    target_os = "wasi",
+                    target_env = "p1"
+                ))]
+                wasi_buf: Vec::new(),
             })
         }
 
@@ -1082,6 +1483,13 @@ pub mod sign {
         }
 
         pub fn update(&mut self, buf: &[u8]) -> Result<(), ErrorStack> {
+            #[cfg(all(
+                feature = "wasi-crypto",
+                target_arch = "wasm32",
+                target_os = "wasi",
+                target_env = "p1"
+            ))]
+            self.wasi_buf.extend_from_slice(buf);
             match &mut self.any_hash {
                 AnyHash::None => unreachable!("AnyHash::None"),
                 AnyHash::Sha256(x) => x.update(buf),
@@ -1102,6 +1510,22 @@ pub mod sign {
             } else {
                 unreachable!();
             };
+            #[cfg(all(
+                feature = "wasi-crypto",
+                target_arch = "wasm32",
+                target_os = "wasi",
+                target_env = "p1"
+            ))]
+            if let Some(ok) = wasi_crypto::rsa_verify(
+                rsa_key,
+                self.padding,
+                &self.message_digest,
+                self.salt_len,
+                &self.wasi_buf,
+                signature,
+            )? {
+                return Ok(ok);
+            }
             let rsa_key = rsa_key.clone();
             match self.padding {
                 Padding::NONE => panic!("Padding not set"),
@@ -1184,8 +1608,26 @@ pub mod sign {
 use symm::*;
 pub mod symm {
     use super::*;
+    #[cfg(not(all(
+        feature = "wasi-crypto",
+        target_arch = "wasm32",
+        target_os = "wasi",
+        target_env = "p1"
+    )))]
     use aes_gcm::aead::generic_array::GenericArray;
+    #[cfg(not(all(
+        feature = "wasi-crypto",
+        target_arch = "wasm32",
+        target_os = "wasi",
+        target_env = "p1"
+    )))]
     use aes_gcm::aead::{AeadInPlace, KeyInit};
+    #[cfg(not(all(
+        feature = "wasi-crypto",
+        target_arch = "wasm32",
+        target_os = "wasi",
+        target_env = "p1"
+    )))]
     use aes_gcm::{Aes128Gcm, Aes256Gcm};
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1242,8 +1684,27 @@ pub mod symm {
     }
 
     enum AesGcmCipher {
+        #[cfg(not(all(
+            feature = "wasi-crypto",
+            target_arch = "wasm32",
+            target_os = "wasi",
+            target_env = "p1"
+        )))]
         Aes128(Box<Aes128Gcm>),
+        #[cfg(not(all(
+            feature = "wasi-crypto",
+            target_arch = "wasm32",
+            target_os = "wasi",
+            target_env = "p1"
+        )))]
         Aes256(Box<Aes256Gcm>),
+        #[cfg(all(
+            feature = "wasi-crypto",
+            target_arch = "wasm32",
+            target_os = "wasi",
+            target_env = "p1"
+        ))]
+        Wasi(wasi_crypto::WasiAeadKey),
     }
 
     pub struct Crypter {
@@ -1277,15 +1738,49 @@ pub mod symm {
                     if key.len() != 16 {
                         return Err(ErrorStack::KeyError);
                     }
-                    let key_arr = GenericArray::from_slice(key);
-                    AesGcmCipher::Aes128(Box::new(Aes128Gcm::new(key_arr)))
+                    #[cfg(all(
+                        feature = "wasi-crypto",
+                        target_arch = "wasm32",
+                        target_os = "wasi",
+                        target_env = "p1"
+                    ))]
+                    {
+                        AesGcmCipher::Wasi(wasi_crypto::aead_key("AES-128-GCM", key)?)
+                    }
+                    #[cfg(not(all(
+                        feature = "wasi-crypto",
+                        target_arch = "wasm32",
+                        target_os = "wasi",
+                        target_env = "p1"
+                    )))]
+                    {
+                        let key_arr = GenericArray::from_slice(key);
+                        AesGcmCipher::Aes128(Box::new(Aes128Gcm::new(key_arr)))
+                    }
                 }
                 CipherType::Aes256Gcm => {
                     if key.len() != 32 {
                         return Err(ErrorStack::KeyError);
                     }
-                    let key_arr = GenericArray::from_slice(key);
-                    AesGcmCipher::Aes256(Box::new(Aes256Gcm::new(key_arr)))
+                    #[cfg(all(
+                        feature = "wasi-crypto",
+                        target_arch = "wasm32",
+                        target_os = "wasi",
+                        target_env = "p1"
+                    ))]
+                    {
+                        AesGcmCipher::Wasi(wasi_crypto::aead_key("AES-256-GCM", key)?)
+                    }
+                    #[cfg(not(all(
+                        feature = "wasi-crypto",
+                        target_arch = "wasm32",
+                        target_os = "wasi",
+                        target_env = "p1"
+                    )))]
+                    {
+                        let key_arr = GenericArray::from_slice(key);
+                        AesGcmCipher::Aes256(Box::new(Aes256Gcm::new(key_arr)))
+                    }
                 }
             };
 
@@ -1308,23 +1803,47 @@ pub mod symm {
         }
 
         pub fn update(&mut self, input: &[u8], output: &mut [u8]) -> Result<usize, ErrorStack> {
-            let nonce = GenericArray::from_slice(&self.nonce);
-
             match self.mode {
                 Mode::Encrypt => {
                     self.input_buf = input.to_vec();
-                    let tag = match &self.cipher {
-                        AesGcmCipher::Aes128(c) => c
-                            .encrypt_in_place_detached(nonce, &self.aad, &mut self.input_buf)
-                            .map_err(|_| ErrorStack::KeyError)?,
-                        AesGcmCipher::Aes256(c) => c
-                            .encrypt_in_place_detached(nonce, &self.aad, &mut self.input_buf)
-                            .map_err(|_| ErrorStack::KeyError)?,
+                    #[cfg(all(
+                        feature = "wasi-crypto",
+                        target_arch = "wasm32",
+                        target_os = "wasi",
+                        target_env = "p1"
+                    ))]
+                    let tag = {
+                        let AesGcmCipher::Wasi(c) = &self.cipher;
+                        wasi_crypto::aead_encrypt_detached(
+                            c,
+                            &self.nonce,
+                            &self.aad,
+                            &mut self.input_buf,
+                            input,
+                        )?
+                    };
+                    #[cfg(not(all(
+                        feature = "wasi-crypto",
+                        target_arch = "wasm32",
+                        target_os = "wasi",
+                        target_env = "p1"
+                    )))]
+                    let tag = {
+                        let nonce = GenericArray::from_slice(&self.nonce);
+                        let tag = match &self.cipher {
+                            AesGcmCipher::Aes128(c) => c
+                                .encrypt_in_place_detached(nonce, &self.aad, &mut self.input_buf)
+                                .map_err(|_| ErrorStack::KeyError)?,
+                            AesGcmCipher::Aes256(c) => c
+                                .encrypt_in_place_detached(nonce, &self.aad, &mut self.input_buf)
+                                .map_err(|_| ErrorStack::KeyError)?,
+                        };
+                        let mut tag_arr = [0u8; 16];
+                        tag_arr.copy_from_slice(&tag);
+                        tag_arr
                     };
                     output[..self.input_buf.len()].copy_from_slice(&self.input_buf);
-                    let mut tag_arr = [0u8; 16];
-                    tag_arr.copy_from_slice(&tag);
-                    self.output_tag = Some(tag_arr);
+                    self.output_tag = Some(tag);
                 }
                 Mode::Decrypt => {
                     self.input_buf = input.to_vec();
@@ -1337,17 +1856,43 @@ pub mod symm {
 
         pub fn finalize(&mut self, _output: &mut [u8]) -> Result<usize, ErrorStack> {
             if self.mode == Mode::Decrypt {
-                let nonce = GenericArray::from_slice(&self.nonce);
-                let tag = self.tag.ok_or(ErrorStack::KeyError)?;
-                let tag = GenericArray::from_slice(&tag);
-                match &self.cipher {
-                    AesGcmCipher::Aes128(c) => c
-                        .decrypt_in_place_detached(nonce, &self.aad, &mut self.input_buf, tag)
-                        .map_err(|_| ErrorStack::KeyError)?,
-                    AesGcmCipher::Aes256(c) => c
-                        .decrypt_in_place_detached(nonce, &self.aad, &mut self.input_buf, tag)
-                        .map_err(|_| ErrorStack::KeyError)?,
-                };
+                let tag_arr = self.tag.ok_or(ErrorStack::KeyError)?;
+                #[cfg(all(
+                    feature = "wasi-crypto",
+                    target_arch = "wasm32",
+                    target_os = "wasi",
+                    target_env = "p1"
+                ))]
+                {
+                    let AesGcmCipher::Wasi(c) = &self.cipher;
+                    let ciphertext = self.input_buf.clone();
+                    wasi_crypto::aead_decrypt_detached(
+                        c,
+                        &self.nonce,
+                        &self.aad,
+                        &mut self.input_buf,
+                        &ciphertext,
+                        &tag_arr,
+                    )?;
+                }
+                #[cfg(not(all(
+                    feature = "wasi-crypto",
+                    target_arch = "wasm32",
+                    target_os = "wasi",
+                    target_env = "p1"
+                )))]
+                {
+                    let nonce = GenericArray::from_slice(&self.nonce);
+                    let tag = GenericArray::from_slice(&tag_arr);
+                    match &self.cipher {
+                        AesGcmCipher::Aes128(c) => c
+                            .decrypt_in_place_detached(nonce, &self.aad, &mut self.input_buf, tag)
+                            .map_err(|_| ErrorStack::KeyError)?,
+                        AesGcmCipher::Aes256(c) => c
+                            .decrypt_in_place_detached(nonce, &self.aad, &mut self.input_buf, tag)
+                            .map_err(|_| ErrorStack::KeyError)?,
+                    };
+                }
                 if let Some(ptr) = self.output_ptr {
                     let copy_len = self.output_len.min(self.input_buf.len());
                     unsafe {
@@ -1521,7 +2066,10 @@ pub mod mldsa {
             Ok((pubkey, privkey))
         }
 
-        pub fn from_seed(algorithm: Algorithm, seed: &MlDsaPrivateKeySeed) -> Result<Self, ErrorStack> {
+        pub fn from_seed(
+            algorithm: Algorithm,
+            seed: &MlDsaPrivateKeySeed,
+        ) -> Result<Self, ErrorStack> {
             let b32 = ml_dsa::B32::from(*seed);
             let (inner, actual_seed) = match algorithm {
                 Algorithm::MlDsa44 => {
@@ -1809,6 +2357,92 @@ fn test_nid_roundtrip() {
 fn test_cipher_nid() {
     assert_eq!(symm::Cipher::aes_128_gcm().nid(), Nid::AES_128_GCM);
     assert_eq!(symm::Cipher::aes_256_gcm().nid(), Nid::AES_256_GCM);
+}
+
+#[test]
+fn test_aes_128_gcm_known_vector() {
+    let key = [0u8; 16];
+    let iv = [0u8; 12];
+    let plaintext = [0u8; 16];
+    let expected_ciphertext = [
+        0x03, 0x88, 0xda, 0xce, 0x60, 0xb6, 0xa3, 0x92, 0xf3, 0x28, 0xc2, 0xb9, 0x71, 0xb2, 0xfe,
+        0x78,
+    ];
+    let expected_tag = [
+        0xab, 0x6e, 0x47, 0xd4, 0x2c, 0xec, 0x13, 0xbd, 0xf5, 0x3a, 0x67, 0xb2, 0x12, 0x57, 0xbd,
+        0xdf,
+    ];
+
+    let mut enc = symm::Crypter::new(
+        symm::Cipher::aes_128_gcm(),
+        symm::Mode::Encrypt,
+        &key,
+        Some(&iv),
+    )
+    .unwrap();
+    let mut ciphertext = [0u8; 16];
+    assert_eq!(enc.update(&plaintext, &mut ciphertext).unwrap(), 16);
+    assert_eq!(enc.finalize(&mut []).unwrap(), 0);
+    let mut tag = [0u8; 16];
+    enc.get_tag(&mut tag).unwrap();
+    assert_eq!(ciphertext, expected_ciphertext);
+    assert_eq!(tag, expected_tag);
+
+    let mut dec = symm::Crypter::new(
+        symm::Cipher::aes_128_gcm(),
+        symm::Mode::Decrypt,
+        &key,
+        Some(&iv),
+    )
+    .unwrap();
+    let mut recovered = [0u8; 16];
+    assert_eq!(dec.update(&ciphertext, &mut recovered).unwrap(), 16);
+    dec.set_tag(&tag).unwrap();
+    assert_eq!(dec.finalize(&mut []).unwrap(), 0);
+    assert_eq!(recovered, plaintext);
+}
+
+#[test]
+fn test_aes_256_gcm_known_vector() {
+    let key = [0u8; 32];
+    let iv = [0u8; 12];
+    let plaintext = [0u8; 16];
+    let expected_ciphertext = [
+        0xce, 0xa7, 0x40, 0x3d, 0x4d, 0x60, 0x6b, 0x6e, 0x07, 0x4e, 0xc5, 0xd3, 0xba, 0xf3, 0x9d,
+        0x18,
+    ];
+    let expected_tag = [
+        0xd0, 0xd1, 0xc8, 0xa7, 0x99, 0x99, 0x6b, 0xf0, 0x26, 0x5b, 0x98, 0xb5, 0xd4, 0x8a, 0xb9,
+        0x19,
+    ];
+
+    let mut enc = symm::Crypter::new(
+        symm::Cipher::aes_256_gcm(),
+        symm::Mode::Encrypt,
+        &key,
+        Some(&iv),
+    )
+    .unwrap();
+    let mut ciphertext = [0u8; 16];
+    assert_eq!(enc.update(&plaintext, &mut ciphertext).unwrap(), 16);
+    assert_eq!(enc.finalize(&mut []).unwrap(), 0);
+    let mut tag = [0u8; 16];
+    enc.get_tag(&mut tag).unwrap();
+    assert_eq!(ciphertext, expected_ciphertext);
+    assert_eq!(tag, expected_tag);
+
+    let mut dec = symm::Crypter::new(
+        symm::Cipher::aes_256_gcm(),
+        symm::Mode::Decrypt,
+        &key,
+        Some(&iv),
+    )
+    .unwrap();
+    let mut recovered = [0u8; 16];
+    assert_eq!(dec.update(&ciphertext, &mut recovered).unwrap(), 16);
+    dec.set_tag(&tag).unwrap();
+    assert_eq!(dec.finalize(&mut []).unwrap(), 0);
+    assert_eq!(recovered, plaintext);
 }
 
 #[test]
