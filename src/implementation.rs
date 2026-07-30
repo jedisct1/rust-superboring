@@ -1624,14 +1624,7 @@ pub mod symm {
         target_os = "wasi",
         target_env = "p1"
     )))]
-    use aes_gcm::aead::generic_array::GenericArray;
-    #[cfg(not(all(
-        feature = "wasi-crypto",
-        target_arch = "wasm32",
-        target_os = "wasi",
-        target_env = "p1"
-    )))]
-    use aes_gcm::aead::{AeadInPlace, KeyInit};
+    use aes_gcm::aead::{AeadInOut, KeyInit};
     #[cfg(not(all(
         feature = "wasi-crypto",
         target_arch = "wasm32",
@@ -1764,7 +1757,7 @@ pub mod symm {
                         target_env = "p1"
                     )))]
                     {
-                        let key_arr = GenericArray::from_slice(key);
+                        let key_arr = key.try_into().map_err(|_| ErrorStack::KeyError)?;
                         AesGcmCipher::Aes128(Box::new(Aes128Gcm::new(key_arr)))
                     }
                 }
@@ -1788,7 +1781,7 @@ pub mod symm {
                         target_env = "p1"
                     )))]
                     {
-                        let key_arr = GenericArray::from_slice(key);
+                        let key_arr = key.try_into().map_err(|_| ErrorStack::KeyError)?;
                         AesGcmCipher::Aes256(Box::new(Aes256Gcm::new(key_arr)))
                     }
                 }
@@ -1839,13 +1832,21 @@ pub mod symm {
                         target_env = "p1"
                     )))]
                     let tag = {
-                        let nonce = GenericArray::from_slice(&self.nonce);
+                        let nonce = (&self.nonce).into();
                         let tag = match &self.cipher {
                             AesGcmCipher::Aes128(c) => c
-                                .encrypt_in_place_detached(nonce, &self.aad, &mut self.input_buf)
+                                .encrypt_inout_detached(
+                                    nonce,
+                                    &self.aad,
+                                    self.input_buf.as_mut_slice().into(),
+                                )
                                 .map_err(|_| ErrorStack::KeyError)?,
                             AesGcmCipher::Aes256(c) => c
-                                .encrypt_in_place_detached(nonce, &self.aad, &mut self.input_buf)
+                                .encrypt_inout_detached(
+                                    nonce,
+                                    &self.aad,
+                                    self.input_buf.as_mut_slice().into(),
+                                )
                                 .map_err(|_| ErrorStack::KeyError)?,
                         };
                         let mut tag_arr = [0u8; 16];
@@ -1892,14 +1893,24 @@ pub mod symm {
                     target_env = "p1"
                 )))]
                 {
-                    let nonce = GenericArray::from_slice(&self.nonce);
-                    let tag = GenericArray::from_slice(&tag_arr);
+                    let nonce = (&self.nonce).into();
+                    let tag = (&tag_arr).into();
                     match &self.cipher {
                         AesGcmCipher::Aes128(c) => c
-                            .decrypt_in_place_detached(nonce, &self.aad, &mut self.input_buf, tag)
+                            .decrypt_inout_detached(
+                                nonce,
+                                &self.aad,
+                                self.input_buf.as_mut_slice().into(),
+                                tag,
+                            )
                             .map_err(|_| ErrorStack::KeyError)?,
                         AesGcmCipher::Aes256(c) => c
-                            .decrypt_in_place_detached(nonce, &self.aad, &mut self.input_buf, tag)
+                            .decrypt_inout_detached(
+                                nonce,
+                                &self.aad,
+                                self.input_buf.as_mut_slice().into(),
+                                tag,
+                            )
                             .map_err(|_| ErrorStack::KeyError)?,
                     };
                 }
@@ -2453,6 +2464,54 @@ fn test_aes_256_gcm_known_vector() {
     dec.set_tag(&tag).unwrap();
     assert_eq!(dec.finalize(&mut []).unwrap(), 0);
     assert_eq!(recovered, plaintext);
+}
+
+#[test]
+fn test_aes_256_gcm_authentication() {
+    let key = [0x42u8; 32];
+    let iv = [0x24u8; 12];
+    let aad = b"eyJhbGciOiJBMjU2S1ciLCJlbmMiOiJBMjU2R0NNIn0";
+    let plaintext = *b"sixteen bytes!!!";
+
+    let mut enc = symm::Crypter::new(
+        symm::Cipher::aes_256_gcm(),
+        symm::Mode::Encrypt,
+        &key,
+        Some(&iv),
+    )
+    .unwrap();
+    enc.aad_update(aad).unwrap();
+    let mut ciphertext = [0u8; 16];
+    enc.update(&plaintext, &mut ciphertext).unwrap();
+    enc.finalize(&mut []).unwrap();
+    let mut tag = [0u8; 16];
+    enc.get_tag(&mut tag).unwrap();
+
+    let decrypt = |aad: &[u8], ciphertext: &[u8], tag: &[u8]| {
+        let mut dec = symm::Crypter::new(
+            symm::Cipher::aes_256_gcm(),
+            symm::Mode::Decrypt,
+            &key,
+            Some(&iv),
+        )
+        .unwrap();
+        dec.aad_update(aad).unwrap();
+        let mut recovered = [0u8; 16];
+        dec.update(ciphertext, &mut recovered).unwrap();
+        dec.set_tag(tag).unwrap();
+        dec.finalize(&mut []).map(|_| recovered)
+    };
+
+    assert_eq!(decrypt(aad, &ciphertext, &tag).unwrap(), plaintext);
+    assert!(decrypt(b"a different header", &ciphertext, &tag).is_err());
+
+    let mut bad_tag = tag;
+    bad_tag[0] ^= 1;
+    assert!(decrypt(aad, &ciphertext, &bad_tag).is_err());
+
+    let mut bad_ciphertext = ciphertext;
+    bad_ciphertext[0] ^= 1;
+    assert!(decrypt(aad, &bad_ciphertext, &tag).is_err());
 }
 
 #[test]
