@@ -399,7 +399,7 @@ pub mod rsa {
         }
 
         pub fn bits(&self) -> u32 {
-            self.size() * 8
+            self.n().num_bits() as u32
         }
 
         pub fn check_key(&self) -> Result<bool, ErrorStack> {
@@ -607,7 +607,7 @@ pub mod rsa {
         }
 
         pub fn bits(&self) -> u32 {
-            self.size() * 8
+            self.n().num_bits() as u32
         }
 
         pub fn check_key(&self) -> Result<bool, ErrorStack> {
@@ -939,6 +939,16 @@ pub mod bn {
 
         pub fn to_owned(&self) -> Result<BigNum, ErrorStack> {
             Ok(self.clone())
+        }
+
+        /// Returns the number of significant bits in `self`.
+        pub fn num_bits(&self) -> i32 {
+            self.rsa_bn.bits() as i32
+        }
+
+        /// Returns the size of `self` in bytes.
+        pub fn num_bytes(&self) -> i32 {
+            (self.num_bits() + 7) / 8
         }
     }
 }
