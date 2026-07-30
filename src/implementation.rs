@@ -1950,6 +1950,8 @@ use mldsa::*;
 pub mod mldsa {
     use super::*;
 
+    use ml_dsa::EncodedVerifyingKey;
+
     pub const PRIVATE_KEY_SEED_BYTES: usize = 32;
     pub type MlDsaPrivateKeySeed = [u8; PRIVATE_KEY_SEED_BYTES];
 
@@ -1994,23 +1996,23 @@ pub mod mldsa {
     }
 
     impl MlDsaPublicKey {
-        pub fn from_bytes(algorithm: Algorithm, bytes: &[u8]) -> Result<Self, ErrorStack> {
+        pub fn from_slice(
+            algorithm: Algorithm,
+            serialized_public_key: &[u8],
+        ) -> Result<Self, ErrorStack> {
+            fn decode<P: ml_dsa::MlDsaParams>(
+                bytes: &[u8],
+            ) -> Result<Box<ml_dsa::VerifyingKey<P>>, ErrorStack> {
+                // The encoded key type has a fixed size, hence no explicit length check.
+                let enc = EncodedVerifyingKey::<P>::try_from(bytes)
+                    .map_err(|_| ErrorStack::InvalidPublicKey)?;
+                Ok(Box::new(ml_dsa::VerifyingKey::decode(&enc)))
+            }
+
             let inner = match algorithm {
-                Algorithm::MlDsa44 => {
-                    let enc = ml_dsa::EncodedVerifyingKey::<ml_dsa::MlDsa44>::try_from(bytes)
-                        .map_err(|_| ErrorStack::InvalidPublicKey)?;
-                    VerifyingKeyInner::MlDsa44(Box::new(ml_dsa::VerifyingKey::decode(&enc)))
-                }
-                Algorithm::MlDsa65 => {
-                    let enc = ml_dsa::EncodedVerifyingKey::<ml_dsa::MlDsa65>::try_from(bytes)
-                        .map_err(|_| ErrorStack::InvalidPublicKey)?;
-                    VerifyingKeyInner::MlDsa65(Box::new(ml_dsa::VerifyingKey::decode(&enc)))
-                }
-                Algorithm::MlDsa87 => {
-                    let enc = ml_dsa::EncodedVerifyingKey::<ml_dsa::MlDsa87>::try_from(bytes)
-                        .map_err(|_| ErrorStack::InvalidPublicKey)?;
-                    VerifyingKeyInner::MlDsa87(Box::new(ml_dsa::VerifyingKey::decode(&enc)))
-                }
+                Algorithm::MlDsa44 => VerifyingKeyInner::MlDsa44(decode(serialized_public_key)?),
+                Algorithm::MlDsa65 => VerifyingKeyInner::MlDsa65(decode(serialized_public_key)?),
+                Algorithm::MlDsa87 => VerifyingKeyInner::MlDsa87(decode(serialized_public_key)?),
             };
             Ok(MlDsaPublicKey { algorithm, inner })
         }
@@ -2019,12 +2021,12 @@ pub mod mldsa {
             self.algorithm
         }
 
-        pub fn to_bytes(&self) -> Vec<u8> {
-            match &self.inner {
+        pub fn to_bytes(&self) -> Result<Vec<u8>, ErrorStack> {
+            Ok(match &self.inner {
                 VerifyingKeyInner::MlDsa44(vk) => vk.encode().to_vec(),
                 VerifyingKeyInner::MlDsa65(vk) => vk.encode().to_vec(),
                 VerifyingKeyInner::MlDsa87(vk) => vk.encode().to_vec(),
-            }
+            })
         }
 
         pub fn verify(&self, msg: &[u8], signature: &[u8]) -> Result<(), ErrorStack> {
@@ -2061,12 +2063,14 @@ pub mod mldsa {
         }
     }
 
+    #[derive(Clone)]
     enum SigningKeyInner {
         MlDsa44(Box<ml_dsa::SigningKey<ml_dsa::MlDsa44>>),
         MlDsa65(Box<ml_dsa::SigningKey<ml_dsa::MlDsa65>>),
         MlDsa87(Box<ml_dsa::SigningKey<ml_dsa::MlDsa87>>),
     }
 
+    #[derive(Clone)]
     pub struct MlDsaPrivateKey {
         algorithm: Algorithm,
         seed: MlDsaPrivateKeySeed,
@@ -2083,7 +2087,7 @@ pub mod mldsa {
             let privkey = Self::from_seed(algorithm, &seed);
             seed.fill(0);
             let privkey = privkey?;
-            let pubkey = privkey.public_key();
+            let pubkey = privkey.public_key()?;
             Ok((pubkey, privkey))
         }
 
@@ -2116,7 +2120,7 @@ pub mod mldsa {
             })
         }
 
-        pub fn public_key(&self) -> MlDsaPublicKey {
+        pub fn public_key(&self) -> Result<MlDsaPublicKey, ErrorStack> {
             let inner = match &self.inner {
                 SigningKeyInner::MlDsa44(sk) => VerifyingKeyInner::MlDsa44(Box::new(
                     ml_dsa::signature::Keypair::verifying_key(sk.as_ref()),
@@ -2128,37 +2132,39 @@ pub mod mldsa {
                     ml_dsa::signature::Keypair::verifying_key(sk.as_ref()),
                 )),
             };
-            MlDsaPublicKey {
+            Ok(MlDsaPublicKey {
                 algorithm: self.algorithm,
                 inner,
-            }
+            })
         }
 
         pub fn algorithm(&self) -> Algorithm {
             self.algorithm
         }
 
-        pub fn seed(&self) -> &MlDsaPrivateKeySeed {
+        pub fn seed_bytes(&self) -> &MlDsaPrivateKeySeed {
             &self.seed
         }
 
         pub fn sign(&self, msg: &[u8]) -> Result<Vec<u8>, ErrorStack> {
+            // BoringSSL uses the hedged variant, so we do too.
+            let mut rng = ml_dsa::common::getrandom::SysRng;
             let sig_bytes = match &self.inner {
                 SigningKeyInner::MlDsa44(sk) => sk
                     .expanded_key()
-                    .sign_deterministic(msg, &[])
+                    .sign_randomized(msg, &[], &mut rng)
                     .map_err(|_| ErrorStack::InternalError)?
                     .encode()
                     .to_vec(),
                 SigningKeyInner::MlDsa65(sk) => sk
                     .expanded_key()
-                    .sign_deterministic(msg, &[])
+                    .sign_randomized(msg, &[], &mut rng)
                     .map_err(|_| ErrorStack::InternalError)?
                     .encode()
                     .to_vec(),
                 SigningKeyInner::MlDsa87(sk) => sk
                     .expanded_key()
-                    .sign_deterministic(msg, &[])
+                    .sign_randomized(msg, &[], &mut rng)
                     .map_err(|_| ErrorStack::InternalError)?
                     .encode()
                     .to_vec(),
@@ -2531,61 +2537,128 @@ fn test_sign_oneshot() {
     assert!(verifier.verify_oneshot(&signature, b"hello").unwrap());
 }
 
-#[test]
-fn test_mldsa_sign_verify_44() {
-    let (pk, sk) = MlDsaPrivateKey::generate(Algorithm::MlDsa44).unwrap();
-    let sig = sk.sign(b"hello world").unwrap();
-    assert_eq!(sig.len(), Algorithm::MlDsa44.signature_bytes());
-    pk.verify(b"hello world", &sig).unwrap();
+#[cfg(test)]
+const MLDSA_ALGORITHMS: [Algorithm; 3] =
+    [Algorithm::MlDsa44, Algorithm::MlDsa65, Algorithm::MlDsa87];
+
+#[cfg(test)]
+fn hex<const N: usize>(s: &str) -> [u8; N] {
+    assert_eq!(s.len(), N * 2);
+    let mut out = [0u8; N];
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).unwrap();
+    }
+    out
 }
 
 #[test]
-fn test_mldsa_sign_verify_65() {
-    let (pk, sk) = MlDsaPrivateKey::generate(Algorithm::MlDsa65).unwrap();
-    let sig = sk.sign(b"hello world").unwrap();
-    assert_eq!(sig.len(), Algorithm::MlDsa65.signature_bytes());
-    pk.verify(b"hello world", &sig).unwrap();
-}
+fn test_mldsa_sign_verify() {
+    for algorithm in MLDSA_ALGORITHMS {
+        let (pk, sk) = MlDsaPrivateKey::generate(algorithm).unwrap();
+        let mut sig = sk.sign(b"hello world").unwrap();
+        assert_eq!(sig.len(), algorithm.signature_bytes());
+        pk.verify(b"hello world", &sig).unwrap();
 
-#[test]
-fn test_mldsa_sign_verify_87() {
-    let (pk, sk) = MlDsaPrivateKey::generate(Algorithm::MlDsa87).unwrap();
-    let sig = sk.sign(b"hello world").unwrap();
-    assert_eq!(sig.len(), Algorithm::MlDsa87.signature_bytes());
-    pk.verify(b"hello world", &sig).unwrap();
-}
-
-#[test]
-fn test_mldsa_from_seed() {
-    let seed: MlDsaPrivateKeySeed = [0x42; 32];
-    let sk1 = MlDsaPrivateKey::from_seed(Algorithm::MlDsa65, &seed).unwrap();
-    let sk2 = MlDsaPrivateKey::from_seed(Algorithm::MlDsa65, &seed).unwrap();
-
-    let sig1 = sk1.sign(b"deterministic").unwrap();
-    let sig2 = sk2.sign(b"deterministic").unwrap();
-    assert_eq!(sig1, sig2);
+        assert!(pk.verify(b"another message", &sig).is_err());
+        sig[5] ^= 1;
+        assert!(pk.verify(b"hello world", &sig).is_err());
+        assert!(pk.verify(b"hello world", &sig[..sig.len() - 1]).is_err());
+        assert!(pk.verify(b"hello world", &[]).is_err());
+    }
 }
 
 #[test]
 fn test_mldsa_seed_roundtrip() {
-    let (_, sk) = MlDsaPrivateKey::generate(Algorithm::MlDsa65).unwrap();
-    let seed = *sk.seed();
-    let sk2 = MlDsaPrivateKey::from_seed(Algorithm::MlDsa65, &seed).unwrap();
+    for algorithm in MLDSA_ALGORITHMS {
+        let generated_seed = *MlDsaPrivateKey::generate(algorithm).unwrap().1.seed_bytes();
 
-    let sig1 = sk.sign(b"roundtrip").unwrap();
-    let sig2 = sk2.sign(b"roundtrip").unwrap();
-    assert_eq!(sig1, sig2);
+        for seed in [[0x42; PRIVATE_KEY_SEED_BYTES], generated_seed] {
+            let sk = MlDsaPrivateKey::from_seed(algorithm, &seed).unwrap();
+            assert_eq!(sk.seed_bytes(), &seed);
+            let pk = sk.public_key().unwrap();
+
+            let rebuilt = MlDsaPrivateKey::from_seed(algorithm, &seed).unwrap();
+            assert_eq!(
+                rebuilt.public_key().unwrap().to_bytes().unwrap(),
+                pk.to_bytes().unwrap()
+            );
+            pk.verify(b"roundtrip", &rebuilt.sign(b"roundtrip").unwrap())
+                .unwrap();
+        }
+    }
 }
 
 #[test]
-fn test_mldsa_algorithm_accessors() {
-    let (pk, sk) = MlDsaPrivateKey::generate(Algorithm::MlDsa44).unwrap();
-    assert_eq!(sk.algorithm(), Algorithm::MlDsa44);
-    assert_eq!(pk.algorithm(), Algorithm::MlDsa44);
+fn test_mldsa_clone_private_key() {
+    for algorithm in MLDSA_ALGORITHMS {
+        let (pk, sk) = MlDsaPrivateKey::generate(algorithm).unwrap();
+        let sk2 = sk.clone();
+        assert_eq!(sk2.algorithm(), sk.algorithm());
+        assert_eq!(sk2.seed_bytes(), sk.seed_bytes());
 
-    let (pk, sk) = MlDsaPrivateKey::generate(Algorithm::MlDsa87).unwrap();
-    assert_eq!(sk.algorithm(), Algorithm::MlDsa87);
-    assert_eq!(pk.algorithm(), Algorithm::MlDsa87);
+        let sig = sk2.sign(b"cloned").unwrap();
+        pk.verify(b"cloned", &sig).unwrap();
+    }
+}
+
+#[test]
+fn test_mldsa_public_from_private() {
+    for algorithm in MLDSA_ALGORITHMS {
+        let (pk, sk) = MlDsaPrivateKey::generate(algorithm).unwrap();
+        assert_eq!(sk.algorithm(), algorithm);
+        assert_eq!(pk.algorithm(), algorithm);
+
+        let derived = sk.public_key().unwrap();
+        assert_eq!(derived.algorithm(), algorithm);
+        assert_eq!(derived.to_bytes().unwrap(), pk.to_bytes().unwrap());
+    }
+}
+
+#[test]
+fn test_mldsa_keygen_nist_vectors() {
+    // Seed and public key digest, from the NIST ACVP vectors that BoringSSL tests against.
+    let vectors: [(Algorithm, [u8; 32], [u8; 32]); 3] = [
+        (
+            Algorithm::MlDsa44,
+            hex("d71361c000f9a7bc99dfb425bcb6bb27c32c36ab444ff3708b2d93b4e66d5b5b"),
+            hex("451a808c522218fadbdab146fc12004b0741c7d069f238f43ad77216159f6a34"),
+        ),
+        (
+            Algorithm::MlDsa65,
+            hex("70cefb9aed5b68e018b079da8284b9d5cad5499ed9c265ff73588005d85c225c"),
+            hex("646b26b8d09dbc9e865b6a006c693a3127b065e62fab5fbe8b159c416462feb6"),
+        ),
+        (
+            Algorithm::MlDsa87,
+            hex("19e9e5efe0c1549ddb1d72213636d16fe2faeb2428257004ae464094ca536a66"),
+            hex("829d88fd913cca728ff6b19bce6ced5e73a54347411db3a4a75f563f18c1ce65"),
+        ),
+    ];
+
+    for (algorithm, seed, expected_digest) in vectors {
+        let sk = MlDsaPrivateKey::from_seed(algorithm, &seed).unwrap();
+        let pk_bytes = sk.public_key().unwrap().to_bytes().unwrap();
+        assert_eq!(pk_bytes.len(), algorithm.public_key_bytes());
+        assert_eq!(Sha256::hash(&pk_bytes), expected_digest);
+    }
+}
+
+#[test]
+fn test_mldsa_signatures_are_randomized() {
+    let (pk, sk) = MlDsaPrivateKey::generate(Algorithm::MlDsa65).unwrap();
+    let sig1 = sk.sign(b"hedged").unwrap();
+    let sig2 = sk.sign(b"hedged").unwrap();
+    assert_ne!(sig1, sig2);
+    pk.verify(b"hedged", &sig1).unwrap();
+    pk.verify(b"hedged", &sig2).unwrap();
+}
+
+#[test]
+fn test_mldsa_debug_redacts_seed() {
+    let (_, sk) = MlDsaPrivateKey::generate(Algorithm::MlDsa44).unwrap();
+    let repr = format!("{:?}", sk);
+    assert!(repr.contains("redacted"));
+    assert!(!repr.contains(&format!("{:?}", sk.seed_bytes())));
 }
 
 #[test]
@@ -2599,27 +2672,25 @@ fn test_mldsa_algorithm_sizes() {
 }
 
 #[test]
-fn test_mldsa_verify_wrong_message() {
-    let (pk, sk) = MlDsaPrivateKey::generate(Algorithm::MlDsa65).unwrap();
-    let sig = sk.sign(b"correct message").unwrap();
-    assert!(pk.verify(b"wrong message", &sig).is_err());
-}
-
-#[test]
 fn test_mldsa_public_key_bytes_roundtrip() {
-    let (pk, sk) = MlDsaPrivateKey::generate(Algorithm::MlDsa65).unwrap();
-    let sig = sk.sign(b"roundtrip test").unwrap();
+    for algorithm in MLDSA_ALGORITHMS {
+        let (pk, sk) = MlDsaPrivateKey::generate(algorithm).unwrap();
+        let sig = sk.sign(b"roundtrip test").unwrap();
 
-    let pk_bytes = pk.to_bytes();
-    assert_eq!(pk_bytes.len(), Algorithm::MlDsa65.public_key_bytes());
+        let pk_bytes = pk.to_bytes().unwrap();
+        assert_eq!(pk_bytes.len(), algorithm.public_key_bytes());
 
-    let pk2 = MlDsaPublicKey::from_bytes(Algorithm::MlDsa65, &pk_bytes).unwrap();
-    assert_eq!(pk2.algorithm(), Algorithm::MlDsa65);
-    pk2.verify(b"roundtrip test", &sig).unwrap();
-}
+        let pk2 = MlDsaPublicKey::from_slice(algorithm, &pk_bytes).unwrap();
+        assert_eq!(pk2.algorithm(), algorithm);
+        assert_eq!(pk2.to_bytes().unwrap(), pk_bytes);
+        pk2.verify(b"roundtrip test", &sig).unwrap();
 
-#[test]
-fn test_mldsa_public_key_from_bytes_wrong_length() {
-    let bad_bytes = [0u8; 100];
-    assert!(MlDsaPublicKey::from_bytes(Algorithm::MlDsa65, &bad_bytes).is_err());
+        for other in MLDSA_ALGORITHMS {
+            if other != algorithm {
+                assert!(MlDsaPublicKey::from_slice(other, &pk_bytes).is_err());
+            }
+        }
+        assert!(MlDsaPublicKey::from_slice(algorithm, &pk_bytes[1..]).is_err());
+        assert!(MlDsaPublicKey::from_slice(algorithm, &[]).is_err());
+    }
 }
