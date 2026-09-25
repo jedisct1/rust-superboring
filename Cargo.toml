@@ -1,7 +1,7 @@
 [package]
 name = "superboring"
 description = "Pure Rust cryptography with a BoringSSL-compatible subset of the boring API: RSA, ML-DSA signatures, AES-GCM encryption, SHA-2, and HMAC. Supports WebAssembly."
-version = "0.2.0"
+version = "0.1.15"
 authors = ["Frank Denis <github@pureftpd.org>"]
 edition = "2021"
 license = "ISC"
