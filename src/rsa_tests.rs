@@ -1,8 +1,10 @@
-//! RSA key checks, compared with what BoringSSL's `RSA_check_key()` accepts.
+//! RSA tests with fixed keys: key checks, compared with what BoringSSL's `RSA_check_key()`
+//! accepts, and OAEP, compared with OpenSSL.
 
 use crate::bn::BigNum;
+use crate::implementation::hex;
 use crate::reexports::rsa as rrsa;
-use crate::rsa::{Rsa, RsaKey};
+use crate::rsa::{Padding, Rsa, RsaKey};
 
 // Generated with `openssl genpkey` (OpenSSL 3.6.4).
 const RSA_1024_PEM: &str = "-----BEGIN RSA PRIVATE KEY-----
@@ -269,4 +271,87 @@ fn multi_prime_keys_are_rejected() {
     assert!(Rsa::private_key_from_pem(RSA_3PRIME_PEM.as_bytes()).is_err());
     let (_, der) = rrsa::pkcs8::SecretDocument::from_pem(RSA_3PRIME_PEM).unwrap();
     assert!(Rsa::private_key_from_der(der.as_bytes()).is_err());
+}
+
+// `openssl pkeyutl -encrypt -pkeyopt rsa_padding_mode:oaep` with RSA_1024_PEM, which
+// leaves both the label hash and MGF1 at their SHA-1 default, as BoringSSL does.
+const OPENSSL_OAEP_PLAINTEXT: &[u8] = b"sixteen byte key";
+const OPENSSL_OAEP_CIPHERTEXT: &str = "5f69a52e31ea9d9cd6bbf4d20cd6e20dc9ad6468b0385c5fae8e857c7b4942d1\
+     fd140867f603fb568b59d77a2071b62c0ddcaec98d52a64c795150e05f90ec05\
+     03a19ac472cb2f42dfd7b24d688d7de37ad176eb6759011a761610045496ab3e\
+     56aef41a73c4c8ced6169fc6844e64746a52a5a7c50fa5bbbab76594c903daca";
+
+#[test]
+fn oaep_decrypts_openssl_ciphertexts() {
+    let sk = Rsa::private_key_from_pem(RSA_1024_PEM.as_bytes()).unwrap();
+    let ciphertext: [u8; 128] = hex(OPENSSL_OAEP_CIPHERTEXT);
+    let mut plaintext = [0u8; 128];
+    let len = sk
+        .private_decrypt(&ciphertext, &mut plaintext, Padding::PKCS1_OAEP)
+        .unwrap();
+    assert_eq!(&plaintext[..len], OPENSSL_OAEP_PLAINTEXT);
+
+    let mut tampered = ciphertext;
+    tampered[127] ^= 1;
+    assert!(sk
+        .private_decrypt(&tampered, &mut plaintext, Padding::PKCS1_OAEP)
+        .is_err());
+}
+
+fn mgf1_sha1(seed: &[u8], len: usize) -> Vec<u8> {
+    (0u32..)
+        .flat_map(|counter| {
+            let mut h = hmac_sha1_compact::Hash::new();
+            h.update(seed);
+            h.update(counter.to_be_bytes());
+            h.finalize()
+        })
+        .take(len)
+        .collect()
+}
+
+/// EME-OAEP decoding from RFC 8017 with SHA-1 and an empty label, written out so that the
+/// check doesn't depend on the rsa crate's OAEP code.
+fn oaep_sha1_decode(em: &[u8]) -> Vec<u8> {
+    const EMPTY_LABEL_SHA1: &str = "da39a3ee5e6b4b0d3255bfef95601890afd80709";
+
+    assert_eq!(em[0], 0);
+    let (masked_seed, masked_db) = em[1..].split_at(20);
+    let seed: Vec<u8> = masked_seed
+        .iter()
+        .zip(mgf1_sha1(masked_db, 20))
+        .map(|(a, b)| a ^ b)
+        .collect();
+    let db: Vec<u8> = masked_db
+        .iter()
+        .zip(mgf1_sha1(&seed, masked_db.len()))
+        .map(|(a, b)| a ^ b)
+        .collect();
+    assert_eq!(db[..20], hex::<20>(EMPTY_LABEL_SHA1));
+    let separator = 20 + db[20..].iter().position(|&x| x != 0).unwrap();
+    assert_eq!(db[separator], 1);
+    db[separator + 1..].to_vec()
+}
+
+#[test]
+fn oaep_encrypts_like_openssl() {
+    use rrsa::pkcs1::DecodeRsaPrivateKey;
+    use rrsa::traits::PublicKeyParts;
+
+    let sk = Rsa::private_key_from_pem(RSA_1024_PEM.as_bytes()).unwrap();
+    let pk = sk.public_key().unwrap();
+    let mut ciphertext = [0u8; 128];
+    let len = pk
+        .public_encrypt(OPENSSL_OAEP_PLAINTEXT, &mut ciphertext, Padding::PKCS1_OAEP)
+        .unwrap();
+    assert_eq!(len, 128);
+
+    let key = rrsa::RsaPrivateKey::from_pkcs1_pem(RSA_1024_PEM).unwrap();
+    let c = rrsa::BigUint::from_bytes_be(&ciphertext);
+    let m = rrsa::hazmat::rsa_decrypt_and_check(&key, None::<&mut rand::rngs::ThreadRng>, &c)
+        .unwrap();
+    let mut em = vec![0u8; key.size()];
+    let m = m.to_bytes_be();
+    em[key.size() - m.len()..].copy_from_slice(&m);
+    assert_eq!(oaep_sha1_decode(&em), OPENSSL_OAEP_PLAINTEXT);
 }

@@ -1,3 +1,4 @@
+use hmac_sha1_compact::WrappedHash as Sha1;
 use hmac_sha256::Hash as Sha256;
 use hmac_sha512::sha384::Hash as Sha384;
 use hmac_sha512::Hash as Sha512;
@@ -570,7 +571,7 @@ pub mod rsa {
                     .map_err(|_| ErrorStack::InvalidPublicKey)?,
                 PaddingId::Pkcs1Pss => panic!("Invalid padding for encryption"),
                 PaddingId::Pkcs1Oaep => rsa_key
-                    .encrypt(&mut rng, rrsa::Oaep::new::<Sha256>(), from)
+                    .encrypt(&mut rng, rrsa::Oaep::new::<Sha1>(), from)
                     .map_err(|_| ErrorStack::InvalidPublicKey)?,
             };
             let len = c.len();
@@ -891,7 +892,7 @@ pub mod rsa {
                     .map_err(|_| ErrorStack::InvalidPrivateKey)?,
                 PaddingId::Pkcs1Pss => panic!("Invalid padding for decryption"),
                 PaddingId::Pkcs1Oaep => rsa_key
-                    .decrypt_blinded(&mut rng, rrsa::Oaep::new::<Sha256>(), from)
+                    .decrypt_blinded(&mut rng, rrsa::Oaep::new::<Sha1>(), from)
                     .map_err(|_| ErrorStack::InvalidPrivateKey)?,
             };
             let len = m.len();
@@ -2669,7 +2670,7 @@ const MLDSA_ALGORITHMS: [Algorithm; 3] =
     [Algorithm::MlDsa44, Algorithm::MlDsa65, Algorithm::MlDsa87];
 
 #[cfg(test)]
-fn hex<const N: usize>(s: &str) -> [u8; N] {
+pub(crate) fn hex<const N: usize>(s: &str) -> [u8; N] {
     assert_eq!(s.len(), N * 2);
     let mut out = [0u8; N];
     for (i, byte) in out.iter_mut().enumerate() {

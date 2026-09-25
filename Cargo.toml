@@ -1,7 +1,7 @@
 [package]
 name = "superboring"
 description = "Pure Rust cryptography with a BoringSSL-compatible subset of the boring API: RSA, ML-DSA signatures, AES-GCM encryption, SHA-2, and HMAC. Supports WebAssembly."
-version = "0.1.16"
+version = "0.1.17"
 authors = ["Frank Denis <github@pureftpd.org>"]
 edition = "2021"
 license = "ISC"
@@ -23,6 +23,7 @@ rrsa = { package = "rsa", version = "0.9.10", optional = true, features = [
 ] }
 
 rand = { version = "0.8.8", optional = true }
+hmac-sha1-compact = { version = "1.1.8", optional = true, features = ["traits010"] }
 hmac-sha256 = { version = "1.1.15", optional = true, features = ["traits010"] }
 hmac-sha512 = { version = "1.1.13", optional = true, features = [
     "traits010",
@@ -44,5 +45,5 @@ wasi-crypto-guest = { version = "0.1.7", optional = true }
 
 [features]
 default = ["enabled"]
-enabled = ["rrsa", "rand", "hmac-sha256", "hmac-sha512", "aes-keywrap", "aes-gcm", "ml-dsa"]
+enabled = ["rrsa", "rand", "hmac-sha1-compact", "hmac-sha256", "hmac-sha512", "aes-keywrap", "aes-gcm", "ml-dsa"]
 wasi-crypto = ["wasi-crypto-guest"]
