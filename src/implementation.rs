@@ -381,6 +381,19 @@ pub mod rsa {
         };
     }
 
+    fn is_odd(x: &rrsa::BigUint) -> bool {
+        x.to_bytes_le()[0] & 1 == 1
+    }
+
+    fn public_parameters_are_valid(n: &rrsa::BigUint, e: &rrsa::BigUint) -> bool {
+        (512..=16384).contains(&n.bits())
+            && is_odd(n)
+            && is_odd(e)
+            && *e > rrsa::BigUint::from(1u8)
+            && e.bits() <= 33
+            && e < n
+    }
+
     impl Rsa<Public> {
         pub fn new() -> Self {
             Rsa {
@@ -402,11 +415,18 @@ pub mod rsa {
             self.n().num_bits() as u32
         }
 
+        /// Checks that the modulus and the public exponent are valid, with the
+        /// same rules as BoringSSL: a positive odd modulus of 512 to 16384 bits,
+        /// and an odd exponent greater than 1 and of at most 33 bits.
+        ///
+        /// It does not enforce any application policy on the key size.
         pub fn check_key(&self) -> Result<bool, ErrorStack> {
-            match self.bits() {
-                2048 | 3072 | 4096 => Ok(true),
-                _ => Ok(false),
-            }
+            let rsa_key = if let RsaKey::Public(x) = &self.rsa_key {
+                x
+            } else {
+                unreachable!();
+            };
+            Ok(public_parameters_are_valid(rsa_key.n(), rsa_key.e()))
         }
 
         pub fn public_key_from_der(der: &[u8]) -> Result<Rsa<Public>, ErrorStack> {
@@ -610,16 +630,21 @@ pub mod rsa {
             self.n().num_bits() as u32
         }
 
+        /// Checks the consistency of a private key, like BoringSSL's
+        /// `RSA_check_key()`: valid public parameters, `d < n`, `n = p * q`, and
+        /// `d * e = 1` modulo `p - 1` and `q - 1`.
+        ///
+        /// It does not enforce any application policy on the key size.
         pub fn check_key(&self) -> Result<bool, ErrorStack> {
             let rsa_key = if let RsaKey::Private(x) = &self.rsa_key {
                 x
             } else {
                 unreachable!();
             };
-            match self.bits() {
-                2048 | 3072 | 4096 => {}
-                _ => return Ok(false),
-            };
+            if !public_parameters_are_valid(rsa_key.n(), rsa_key.e()) || rsa_key.d() >= rsa_key.n()
+            {
+                return Ok(false);
+            }
             if rsa_key.validate().is_err() {
                 return Ok(false);
             }
@@ -632,33 +657,104 @@ pub mod rsa {
             Rsa::from_public_components(n, e)
         }
 
-        pub fn private_key_from_pem(pem: &[u8]) -> Result<Rsa<Private>, ErrorStack> {
-            let rsa_pem = std::str::from_utf8(pem).map_err(|_| ErrorStack::InvalidPrivateKey)?;
-            let rsa_pem = rsa_pem.trim();
-            let mut rsa_key = rrsa::RsaPrivateKey::from_pkcs8_pem(rsa_pem)
-                .or_else(|_| rrsa::RsaPrivateKey::from_pkcs1_pem(rsa_pem))
-                .map_err(|_| ErrorStack::InvalidPrivateKey)?;
-            rsa_key
-                .validate()
-                .map_err(|_| ErrorStack::InvalidPrivateKey)?;
-            rsa_key
-                .precompute()
-                .map_err(|_| ErrorStack::InvalidPrivateKey)?;
-            let rsa_key = RsaKey::Private(rsa_key);
+        /// Builds a private key from all of its components, like BoringSSL.
+        ///
+        /// BoringSSL stores the CRT values as given and leaves their verification to
+        /// `check_key()`. The Rust backend can only store values it computes, so
+        /// it checks the supplied ones here instead of silently replacing them: `n = p * q`,
+        /// `d * e = 1` modulo `p - 1` and `q - 1`, `dmp1 = d mod (p - 1)`,
+        /// `dmq1 = d mod (q - 1)` and `iqmp = q^-1 mod p` must all hold.
+        #[allow(clippy::too_many_arguments)]
+        pub fn from_private_components(
+            n: BigNum,
+            e: BigNum,
+            d: BigNum,
+            p: BigNum,
+            q: BigNum,
+            dmp1: BigNum,
+            dmq1: BigNum,
+            iqmp: BigNum,
+        ) -> Result<Rsa<Private>, ErrorStack> {
+            let rsa_key = rrsa::RsaPrivateKey::from_components(
+                n.rsa_bn,
+                e.rsa_bn,
+                d.rsa_bn,
+                vec![p.rsa_bn, q.rsa_bn],
+            )
+            .map_err(|_| ErrorStack::InvalidPrivateKey)?;
+            let consistent = rsa_key.dp() == Some(&dmp1.rsa_bn)
+                && rsa_key.dq() == Some(&dmq1.rsa_bn)
+                && rsa_key.crt_coefficient().as_ref() == Some(&iqmp.rsa_bn);
+            if !consistent {
+                return Err(ErrorStack::InvalidPrivateKey);
+            }
             Ok(Rsa {
-                rsa_key,
+                rsa_key: RsaKey::Private(rsa_key),
                 _marker: std::marker::PhantomData,
             })
         }
 
-        pub fn private_key_from_der(der: &[u8]) -> Result<Rsa<Private>, ErrorStack> {
-            let rsa_key = rrsa::RsaPrivateKey::from_pkcs8_der(der)
-                .or_else(|_| rrsa::RsaPrivateKey::from_pkcs1_der(der))
+        fn from_pkcs1_private_key(
+            key: &rrsa::pkcs1::RsaPrivateKey<'_>,
+        ) -> Result<Rsa<Private>, ErrorStack> {
+            if key.version() != rrsa::pkcs1::Version::TwoPrime {
+                return Err(ErrorStack::InvalidPrivateKey);
+            }
+            let bn = |x: rrsa::pkcs1::UintRef<'_>| BigNum {
+                rsa_bn: rrsa::BigUint::from_bytes_be(x.as_bytes()),
+            };
+            Rsa::from_private_components(
+                bn(key.modulus),
+                bn(key.public_exponent),
+                bn(key.private_exponent),
+                bn(key.prime1),
+                bn(key.prime2),
+                bn(key.exponent1),
+                bn(key.exponent2),
+                bn(key.coefficient),
+            )
+        }
+
+        fn from_pkcs8_private_key(der: &[u8]) -> Result<Rsa<Private>, ErrorStack> {
+            let info = rrsa::pkcs8::PrivateKeyInfo::try_from(der)
                 .map_err(|_| ErrorStack::InvalidPrivateKey)?;
-            let rsa_key = RsaKey::Private(rsa_key);
-            Ok(Rsa {
-                rsa_key,
-                _marker: std::marker::PhantomData,
+            info.algorithm
+                .assert_algorithm_oid(rrsa::pkcs1::ALGORITHM_OID)
+                .map_err(|_| ErrorStack::InvalidPrivateKey)?;
+            let null: rrsa::pkcs8::der::asn1::AnyRef<'_> = rrsa::pkcs8::der::asn1::Null.into();
+            if info.algorithm.parameters_any().ok() != Some(null) {
+                return Err(ErrorStack::InvalidPrivateKey);
+            }
+            let key = rrsa::pkcs1::RsaPrivateKey::try_from(info.private_key)
+                .map_err(|_| ErrorStack::InvalidPrivateKey)?;
+            Self::from_pkcs1_private_key(&key)
+        }
+
+        /// Parses a PKCS#8 or PKCS#1 private key, checking every encoded value including
+        /// the CRT parameters.
+        pub fn private_key_from_pem(pem: &[u8]) -> Result<Rsa<Private>, ErrorStack> {
+            let rsa_pem = std::str::from_utf8(pem).map_err(|_| ErrorStack::InvalidPrivateKey)?;
+            let rsa_pem = rsa_pem.trim();
+            let (label, der) = rrsa::pkcs8::SecretDocument::from_pem(rsa_pem)
+                .map_err(|_| ErrorStack::InvalidPrivateKey)?;
+            match label {
+                "PRIVATE KEY" => Self::from_pkcs8_private_key(der.as_bytes()),
+                "RSA PRIVATE KEY" => {
+                    let key = rrsa::pkcs1::RsaPrivateKey::try_from(der.as_bytes())
+                        .map_err(|_| ErrorStack::InvalidPrivateKey)?;
+                    Self::from_pkcs1_private_key(&key)
+                }
+                _ => Err(ErrorStack::InvalidPrivateKey),
+            }
+        }
+
+        /// Parses a PKCS#8 or PKCS#1 private key, checking every encoded value including
+        /// the CRT parameters.
+        pub fn private_key_from_der(der: &[u8]) -> Result<Rsa<Private>, ErrorStack> {
+            Self::from_pkcs8_private_key(der).or_else(|_| {
+                let key = rrsa::pkcs1::RsaPrivateKey::try_from(der)
+                    .map_err(|_| ErrorStack::InvalidPrivateKey)?;
+                Self::from_pkcs1_private_key(&key)
             })
         }
 
@@ -743,6 +839,37 @@ pub mod rsa {
             BigNum {
                 rsa_bn: rsa_key.primes()[1].clone(),
             }
+        }
+
+        /// `d mod (p - 1)`
+        pub fn dmp1(&self) -> Option<BigNum> {
+            let rsa_key = if let RsaKey::Private(x) = &self.rsa_key {
+                x
+            } else {
+                unreachable!();
+            };
+            rsa_key.dp().map(|x| BigNum { rsa_bn: x.clone() })
+        }
+
+        /// `d mod (q - 1)`
+        pub fn dmq1(&self) -> Option<BigNum> {
+            let rsa_key = if let RsaKey::Private(x) = &self.rsa_key {
+                x
+            } else {
+                unreachable!();
+            };
+            rsa_key.dq().map(|x| BigNum { rsa_bn: x.clone() })
+        }
+
+        /// `q^-1 mod p`
+        pub fn iqmp(&self) -> Option<BigNum> {
+            let rsa_key = if let RsaKey::Private(x) = &self.rsa_key {
+                x
+            } else {
+                unreachable!();
+            };
+            rsa_key.qinv()?;
+            rsa_key.crt_coefficient().map(|x| BigNum { rsa_bn: x })
         }
 
         pub fn private_decrypt(
