@@ -1,6 +1,6 @@
 [package]
 name = "superboring"
-description = "A reimplementation of the 'boring' crate in pure Rust."
+description = "Pure Rust cryptography with a BoringSSL-compatible subset of the boring API: RSA, ML-DSA signatures, AES-GCM encryption, SHA-2, and HMAC. Supports WebAssembly."
 version = "0.1.14"
 authors = ["Frank Denis <github@pureftpd.org>"]
 edition = "2021"
@@ -8,7 +8,7 @@ license = "ISC"
 repository = "https://github.com/jedisct1/rust-superboring"
 homepage = "https://github.com/jedisct1/rust-superboring"
 categories = ["wasm", "api-bindings", "cryptography"]
-keywords = ["boringssl", "crypto", "cryptography", "boring", "rust"]
+keywords = ["boringssl", "boring", "cryptography", "rsa", "wasm"]
 readme = "README.md"
 include = ["src/**/*.rs", "README.md", "LICENSE"]
 
