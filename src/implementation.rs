@@ -1,4 +1,4 @@
-use hmac_sha1_compact::WrappedHash as Sha1;
+use hmac_sha1_compact::WrappedHash011 as Sha1;
 use hmac_sha256::Hash as Sha256;
 use hmac_sha512::sha384::Hash as Sha384;
 use hmac_sha512::Hash as Sha512;
@@ -8,27 +8,8 @@ use hmac_sha256::HMAC as HmacSha256;
 use hmac_sha512::sha384::HMAC as HmacSha384;
 use hmac_sha512::HMAC as HmacSha512;
 
-#[allow(unused_imports)]
-use rrsa::pkcs1::{
-    DecodeRsaPrivateKey as _, DecodeRsaPublicKey as _, EncodeRsaPrivateKey as _,
-    EncodeRsaPublicKey as _,
-};
-#[allow(unused_imports)]
-use rrsa::pkcs8::{
-    AssociatedOid as _, DecodePrivateKey as _, DecodePublicKey as _, EncodePrivateKey as _,
-    EncodePublicKey as _,
-};
-#[allow(unused_imports)]
-use rrsa::signature::{
-    DigestSigner as _, DigestVerifier as _, Keypair as _, KeypairRef as _, PrehashSignature as _,
-    RandomizedDigestSigner as _, RandomizedSigner as _, SignatureEncoding as _, Signer as _,
-    SignerMut as _, Verifier as _,
-};
-#[allow(unused_imports)]
-use rrsa::traits::{
-    Decryptor as _, EncryptingKeypair as _, PaddingScheme as _, PrivateKeyParts as _,
-    PublicKeyParts as _, RandomizedDecryptor as _, RandomizedEncryptor as _, SignatureScheme as _,
-};
+use rrsa::pkcs1::EncodeRsaPrivateKey as _;
+use rrsa::traits::{PrivateKeyParts as _, PublicKeyParts as _};
 
 #[cfg(all(
     feature = "wasi-crypto",
@@ -177,12 +158,12 @@ mod wasi_crypto {
         }
     }
 
-    fn rsa_generate_alg(bits: u32) -> Result<&'static str, ErrorStack> {
+    fn rsa_generate_alg(bits: u32) -> Option<&'static str> {
         match bits {
-            2048 => Ok("RSA_PKCS1_2048_SHA256"),
-            3072 => Ok("RSA_PKCS1_3072_SHA384"),
-            4096 => Ok("RSA_PKCS1_4096_SHA512"),
-            _ => Err(ErrorStack::UnsupportedModulus),
+            2048 => Some("RSA_PKCS1_2048_SHA256"),
+            3072 => Some("RSA_PKCS1_3072_SHA384"),
+            4096 => Some("RSA_PKCS1_4096_SHA512"),
+            _ => None,
         }
     }
 
@@ -190,8 +171,12 @@ mod wasi_crypto {
         bits: usize,
         padding: Padding,
         md: &MessageDigest,
+        mgf1_md: &MessageDigest,
         salt_len: RsaPssSaltlen,
     ) -> Option<&'static str> {
+        if mgf1_md != md {
+            return None;
+        }
         let prefix = match padding {
             Padding::PKCS1 => "RSA_PKCS1",
             Padding::PKCS1_PSS if salt_len.len == RsaPssSaltlen::DIGEST_LENGTH.len => "RSA_PSS",
@@ -214,8 +199,10 @@ mod wasi_crypto {
         }
     }
 
-    pub fn rsa_generate(bits: u32) -> Result<Option<rrsa::RsaPrivateKey>, ErrorStack> {
-        let alg = rsa_generate_alg(bits)?;
+    pub fn rsa_generate(bits: u32) -> Result<Option<rrsa::PrivateKey>, ErrorStack> {
+        let Some(alg) = rsa_generate_alg(bits) else {
+            return Ok(None);
+        };
         let keypair = match SignatureKeyPair::generate(alg) {
             Ok(keypair) => keypair,
             Err(error) if rsa_may_fallback(alg, error) => return Ok(None),
@@ -226,8 +213,8 @@ mod wasi_crypto {
             Err(error) if rsa_may_fallback(alg, error) => return Ok(None),
             Err(error) => return Err(map_error(error)),
         };
-        let mut rsa_key = rrsa::RsaPrivateKey::from_pkcs8_der(&der)
-            .or_else(|_| rrsa::RsaPrivateKey::from_pkcs1_der(&der))
+        let mut rsa_key = rrsa::PrivateKey::from_pkcs8_der(&der)
+            .or_else(|_| rrsa::PrivateKey::from_pkcs1_der(&der))
             .map_err(|_| ErrorStack::InvalidPrivateKey)?;
         rsa_key
             .precompute()
@@ -236,13 +223,15 @@ mod wasi_crypto {
     }
 
     pub fn rsa_sign(
-        rsa_key: &rrsa::RsaPrivateKey,
+        rsa_key: &rrsa::PrivateKey,
         padding: Padding,
         md: &MessageDigest,
+        mgf1_md: &MessageDigest,
         salt_len: RsaPssSaltlen,
         msg: &[u8],
     ) -> Result<Option<Vec<u8>>, ErrorStack> {
-        let Some(alg) = rsa_signature_alg(rsa_key.size() * 8, padding, md, salt_len) else {
+        let Some(alg) = rsa_signature_alg(rsa_key.size() * 8, padding, md, mgf1_md, salt_len)
+        else {
             return Ok(None);
         };
         let der = match rsa_key.to_pkcs8_der() {
@@ -267,14 +256,16 @@ mod wasi_crypto {
     }
 
     pub fn rsa_verify(
-        rsa_key: &rrsa::RsaPublicKey,
+        rsa_key: &rrsa::PublicKey,
         padding: Padding,
         md: &MessageDigest,
+        mgf1_md: &MessageDigest,
         salt_len: RsaPssSaltlen,
         msg: &[u8],
         signature: &[u8],
     ) -> Result<Option<bool>, ErrorStack> {
-        let Some(alg) = rsa_signature_alg(rsa_key.size() * 8, padding, md, salt_len) else {
+        let Some(alg) = rsa_signature_alg(rsa_key.size() * 8, padding, md, mgf1_md, salt_len)
+        else {
             return Ok(None);
         };
         let der = match rsa_key.to_public_key_der() {
@@ -314,8 +305,6 @@ pub mod reexports {
 #[allow(unused_imports)]
 use rsa::*;
 pub mod rsa {
-    use rrsa::pkcs8::EncodePrivateKey;
-
     #[allow(unused_imports)]
     use super::*;
 
@@ -324,8 +313,31 @@ pub mod rsa {
     pub enum RsaKey {
         #[default]
         None,
-        Public(rrsa::RsaPublicKey),
-        Private(rrsa::RsaPrivateKey),
+        Public(rrsa::PublicKey),
+        Private(rrsa::PrivateKey),
+        Invalid(Box<InvalidKey>),
+    }
+
+    /// A key built from components that BoringSSL wouldn't use.
+    ///
+    /// BoringSSL accepts any components and only complains when the key is checked or used, so we keep them as they were given.
+    #[derive(Clone, PartialEq, Eq)]
+    pub struct InvalidKey {
+        n: BigNum,
+        e: BigNum,
+        private: Option<PrivateParts>,
+        /// Set when BoringSSL could still use the key anyway.
+        usable: Option<rrsa::PrivateKey>,
+    }
+
+    #[derive(Clone, PartialEq, Eq)]
+    struct PrivateParts {
+        d: BigNum,
+        p: BigNum,
+        q: BigNum,
+        dmp1: BigNum,
+        dmq1: BigNum,
+        iqmp: BigNum,
     }
 
     impl std::fmt::Debug for RsaKey {
@@ -334,8 +346,144 @@ pub mod rsa {
                 RsaKey::None => write!(f, "RsaKey::None"),
                 RsaKey::Public(_) => write!(f, "RsaKey::Public"),
                 RsaKey::Private(_) => write!(f, "RsaKey::Private"),
+                RsaKey::Invalid(_) => write!(f, "RsaKey::Invalid"),
             }
         }
+    }
+
+    fn bn(x: &rrsa::BoxedUint) -> BigNum {
+        BigNum { rsa_bn: x.clone() }
+    }
+
+    impl RsaKey {
+        fn n(&self) -> BigNum {
+            match self {
+                RsaKey::Public(x) => bn(x.n().as_ref()),
+                RsaKey::Private(x) => bn(x.n().as_ref()),
+                RsaKey::Invalid(x) => x.n.clone(),
+                RsaKey::None => unreachable!(),
+            }
+        }
+
+        fn e(&self) -> BigNum {
+            match self {
+                RsaKey::Public(x) => bn(x.e()),
+                RsaKey::Private(x) => bn(x.e()),
+                RsaKey::Invalid(x) => x.e.clone(),
+                RsaKey::None => unreachable!(),
+            }
+        }
+
+        pub(crate) fn size(&self) -> usize {
+            match self {
+                RsaKey::Public(x) => x.size(),
+                RsaKey::Private(x) => x.size(),
+                RsaKey::Invalid(x) => x.n.num_bytes() as usize,
+                RsaKey::None => unreachable!(),
+            }
+        }
+
+        pub(crate) fn public_key(&self) -> Option<&rrsa::PublicKey> {
+            match self {
+                RsaKey::Public(x) => Some(x),
+                RsaKey::Private(x) => Some(x.as_public_key()),
+                _ => None,
+            }
+        }
+
+        pub(crate) fn private_key(&self) -> Option<&rrsa::PrivateKey> {
+            match self {
+                RsaKey::Private(x) => Some(x),
+                RsaKey::Invalid(x) => x.usable.as_ref(),
+                _ => None,
+            }
+        }
+
+        fn invalid_private(&self) -> &PrivateParts {
+            match self {
+                RsaKey::Invalid(x) => x.private.as_ref().expect("a private key"),
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    fn to_pem(label: &str, der: &[u8]) -> Result<Vec<u8>, ErrorStack> {
+        use rrsa::pkcs1::der::pem::{encode_string, LineEnding};
+
+        encode_string(label, LineEnding::LF, der)
+            .map(String::into_bytes)
+            .map_err(|_| ErrorStack::InvalidPublicKey)
+    }
+
+    // Keys are serialized from their components, so invalid ones come out as they were given, like with BoringSSL.
+
+    fn public_key_der_pkcs1(n: &BigNum, e: &BigNum) -> Result<Vec<u8>, ErrorStack> {
+        use rrsa::pkcs1::der::Encode;
+
+        let (n, e) = (n.rsa_bn.to_be_bytes(), e.rsa_bn.to_be_bytes());
+        let uint_ref = |x| rrsa::pkcs1::UintRef::new(x).map_err(|_| ErrorStack::InvalidPublicKey);
+        rrsa::pkcs1::RsaPublicKeyRef {
+            modulus: uint_ref(&n)?,
+            public_exponent: uint_ref(&e)?,
+        }
+        .to_der()
+        .map_err(|_| ErrorStack::InvalidPublicKey)
+    }
+
+    fn public_key_der(n: &BigNum, e: &BigNum) -> Result<Vec<u8>, ErrorStack> {
+        use rrsa::pkcs1::der::asn1::BitStringRef;
+        use rrsa::pkcs1::der::Encode;
+
+        let key = public_key_der_pkcs1(n, e)?;
+        rrsa::pkcs8::SubjectPublicKeyInfoRef {
+            algorithm: rrsa::pkcs1::ALGORITHM_ID,
+            subject_public_key: BitStringRef::from_bytes(&key)
+                .map_err(|_| ErrorStack::InvalidPublicKey)?,
+        }
+        .to_der()
+        .map_err(|_| ErrorStack::InvalidPublicKey)
+    }
+
+    fn private_key_der(
+        n: &BigNum,
+        e: &BigNum,
+        private: &PrivateParts,
+    ) -> Result<Vec<u8>, ErrorStack> {
+        use rrsa::pkcs1::der::Encode;
+
+        let values = [
+            n,
+            e,
+            &private.d,
+            &private.p,
+            &private.q,
+            &private.dmp1,
+            &private.dmq1,
+            &private.iqmp,
+        ]
+        .map(|x| x.rsa_bn.to_be_bytes());
+        let uint_ref = |i: usize| {
+            rrsa::pkcs1::UintRef::new(&values[i]).map_err(|_| ErrorStack::InvalidPrivateKey)
+        };
+        rrsa::pkcs1::RsaPrivateKeyRef {
+            modulus: uint_ref(0)?,
+            public_exponent: uint_ref(1)?,
+            private_exponent: uint_ref(2)?,
+            prime1: uint_ref(3)?,
+            prime2: uint_ref(4)?,
+            exponent1: uint_ref(5)?,
+            exponent2: uint_ref(6)?,
+            coefficient: uint_ref(7)?,
+            other_prime_infos: None,
+        }
+        .to_der()
+        .map_err(|_| ErrorStack::InvalidPrivateKey)
+    }
+
+    fn crt_values_match(rsa_key: &rrsa::PrivateKey, private: &PrivateParts) -> bool {
+        rsa_key.dp() == Some(&private.dmp1.rsa_bn)
+            && rsa_key.dq() == Some(&private.dmq1.rsa_bn)
+            && rsa_key.qinv().map(|x| x.retrieve()).as_ref() == Some(&private.iqmp.rsa_bn)
     }
 
     #[derive(Clone, Default, PartialEq, Eq)]
@@ -347,6 +495,31 @@ pub mod rsa {
     impl<T> std::fmt::Debug for Rsa<T> {
         fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
             write!(f, "Rsa")
+        }
+    }
+
+    impl<T> Rsa<T> {
+        fn from_key(rsa_key: RsaKey) -> Self {
+            Rsa {
+                rsa_key,
+                _marker: std::marker::PhantomData,
+            }
+        }
+
+        pub fn size(&self) -> u32 {
+            self.rsa_key.size() as u32
+        }
+
+        pub fn bits(&self) -> u32 {
+            self.n().num_bits() as u32
+        }
+
+        pub fn n(&self) -> BigNum {
+            self.rsa_key.n()
+        }
+
+        pub fn e(&self) -> BigNum {
+            self.rsa_key.e()
         }
     }
 
@@ -382,38 +555,364 @@ pub mod rsa {
         };
     }
 
-    fn is_odd(x: &rrsa::BigUint) -> bool {
-        x.to_bytes_le()[0] & 1 == 1
+    // What BoringSSL accepts. The rsa crate defaults to 1024 to 8192 bits.
+    const MODULUS_BITS: std::ops::RangeInclusive<usize> = 512..=16384;
+
+    fn public_parameters_are_valid(n: &rrsa::BoxedUint, e: &rrsa::BoxedUint) -> bool {
+        MODULUS_BITS.contains(&(n.bit_width_vartime() as usize))
+            && n.as_uint_ref().is_odd().to_bool()
+            && e.as_uint_ref().is_odd().to_bool()
+            && *e > rrsa::BoxedUint::one()
+            && e.bit_width_vartime() <= 33
+            && e < n
     }
 
-    fn public_parameters_are_valid(n: &rrsa::BigUint, e: &rrsa::BigUint) -> bool {
-        (512..=16384).contains(&n.bits())
-            && is_odd(n)
-            && is_odd(e)
-            && *e > rrsa::BigUint::from(1u8)
-            && e.bits() <= 33
-            && e < n
+    fn new_public_key(n: BigNum, e: BigNum) -> Result<rrsa::PublicKey, ErrorStack> {
+        rrsa::PublicKey::new_with_size_limits(n.rsa_bn, e.rsa_bn, MODULUS_BITS)
+            .map_err(|_| ErrorStack::InvalidPublicKey)
+    }
+
+    // The rsa crate's own decoders would use its default size limits.
+    fn public_key_from_pkcs1_der(der: &[u8]) -> Result<rrsa::PublicKey, ErrorStack> {
+        let key = rrsa::pkcs1::RsaPublicKeyRef::try_from(der)
+            .map_err(|_| ErrorStack::InvalidPublicKey)?;
+        new_public_key(
+            BigNum::from_slice(key.modulus.as_bytes())?,
+            BigNum::from_slice(key.public_exponent.as_bytes())?,
+        )
+    }
+
+    fn public_key_from_spki_der(der: &[u8]) -> Result<rrsa::PublicKey, ErrorStack> {
+        let spki = rrsa::pkcs8::SubjectPublicKeyInfoRef::try_from(der)
+            .map_err(|_| ErrorStack::InvalidPublicKey)?;
+        if spki.algorithm != rrsa::pkcs1::ALGORITHM_ID {
+            return Err(ErrorStack::InvalidPublicKey);
+        }
+        let key = spki
+            .subject_public_key
+            .as_bytes()
+            .ok_or(ErrorStack::InvalidPublicKey)?;
+        public_key_from_pkcs1_der(key)
+    }
+
+    /// Like BoringSSL's `d2i_*()` functions, anything after the first DER element is ignored.
+    fn first_der_element(der: &[u8]) -> Option<&[u8]> {
+        use rrsa::pkcs1::der::{Reader, SliceReader};
+
+        SliceReader::new(der).ok()?.tlv_bytes().ok()
+    }
+
+    /// BoringSSL rejects attributes that aren't an OID followed by a set of values.
+    fn check_attributes(attributes: &[u8]) -> rrsa::pkcs1::der::Result<()> {
+        use rrsa::pkcs1::der::asn1::AnyRef;
+        use rrsa::pkcs1::der::{Decode, Header, Reader, SliceReader, Tag};
+
+        // Same check as BoringSSL's `CBS_is_valid_asn1_oid()`.
+        let valid_oid = |oid: &[u8]| {
+            let mut prev = 0u8;
+            for &x in oid {
+                if prev & 0x80 == 0 && x == 0x80 {
+                    return false;
+                }
+                prev = x;
+            }
+            !oid.is_empty() && prev & 0x80 == 0
+        };
+        let mut reader = SliceReader::new(attributes)?;
+        while !reader.is_finished() {
+            reader.sequence(|attribute| -> rrsa::pkcs1::der::Result<()> {
+                let header = Header::decode(attribute)?;
+                header.tag().assert_eq(Tag::ObjectIdentifier)?;
+                if !valid_oid(attribute.read_slice(header.length())?) {
+                    return Err(Tag::ObjectIdentifier.value_error().into());
+                }
+                let header = Header::decode(attribute)?;
+                header.tag().assert_eq(Tag::Set)?;
+                attribute.read_nested(header.length(), |values| {
+                    while !values.is_finished() {
+                        AnyRef::decode(values)?;
+                    }
+                    Ok(())
+                })
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Returns the PKCS#1 key inside a PKCS#8 structure.
+    ///
+    /// BoringSSL has two parsers for this: a strict one that only allows attributes after the key, and one that ignores whatever comes after it.
+    fn pkcs8_rsa_private_key(der: &[u8], strict: bool) -> Option<&[u8]> {
+        use rrsa::pkcs1::der::asn1::OctetStringRef;
+        use rrsa::pkcs1::der::{Decode, Header, Reader, SliceReader, Tag, TagNumber};
+
+        let mut reader = SliceReader::new(der).ok()?;
+        let (algorithm, key) = reader
+            .sequence(|seq| -> rrsa::pkcs1::der::Result<_> {
+                if u8::decode(seq)? != 0 {
+                    return Err(Tag::Integer.value_error().into());
+                }
+                let algorithm = rrsa::pkcs8::AlgorithmIdentifierRef::decode(seq)?;
+                let key = <&OctetStringRef>::decode(seq)?;
+                if !strict {
+                    seq.read_slice(seq.remaining_len())?;
+                } else if !seq.is_finished() {
+                    // Anything after the attributes is an error, which the decoder takes care of.
+                    let attributes = Tag::ContextSpecific {
+                        constructed: true,
+                        number: TagNumber(0),
+                    };
+                    let header = Header::decode(seq)?;
+                    if header.tag() != attributes {
+                        return Err(header.tag().value_error().into());
+                    }
+                    check_attributes(seq.read_slice(header.length())?)?;
+                }
+                Ok((algorithm, key))
+            })
+            .ok()?;
+        (algorithm == rrsa::pkcs1::ALGORITHM_ID).then_some(key.as_bytes())
+    }
+
+    /// A port of BoringSSL's PEM reader, which is much more forgiving than the standard.
+    ///
+    /// It ignores text around the blocks, skips blocks with other labels, and doesn't care about line lengths.
+    mod pem {
+        struct Lines<'a>(&'a [u8]);
+
+        impl Lines<'_> {
+            /// Reads a line the way BoringSSL does: at most 253 bytes at a time, with trailing whitespace and control characters replaced by a newline.
+            ///
+            /// Bytes above 0x7f count as control characters too, because `char` is signed in C.
+            fn next(&mut self) -> Option<Vec<u8>> {
+                const MAX_LEN: usize = 253;
+
+                if self.0.is_empty() {
+                    return None;
+                }
+                let len = match self.0.iter().take(MAX_LEN).position(|&c| c == b'\n') {
+                    Some(i) => i + 1,
+                    None => self.0.len().min(MAX_LEN),
+                };
+                let (line, rest) = self.0.split_at(len);
+                self.0 = rest;
+                let mut line = line.to_vec();
+                while line.last().is_some_and(|&c| c as i8 <= b' ' as i8) {
+                    line.pop();
+                }
+                line.push(b'\n');
+                Some(line)
+            }
+        }
+
+        /// What C string functions see of a line.
+        fn c_str(line: &[u8]) -> &[u8] {
+            &line[..line.iter().position(|&c| c == 0).unwrap_or(line.len())]
+        }
+
+        /// Collects lines until the END line, or until a blank line if `stop_at_blank_line` is set, in which case it returns `true`.
+        /// `last` ends up holding the last line read.
+        fn read_until_end(
+            lines: &mut Lines,
+            last: &mut Vec<u8>,
+            out: &mut Vec<u8>,
+            stop_at_blank_line: bool,
+        ) -> bool {
+            while let Some(line) = lines.next() {
+                *last = line;
+                if stop_at_blank_line && last.as_slice() == b"\n" {
+                    return true;
+                }
+                if c_str(last).starts_with(b"-----END ") {
+                    return false;
+                }
+                out.extend_from_slice(last);
+            }
+            last.clear();
+            false
+        }
+
+        /// BoringSSL's base64 decoder, which skips whitespace.
+        fn decode_base64(encoded: &[u8]) -> Option<Vec<u8>> {
+            let value = |c: u8| match c {
+                b'A'..=b'Z' => Some(c - b'A'),
+                b'a'..=b'z' => Some(c - b'a' + 26),
+                b'0'..=b'9' => Some(c - b'0' + 52),
+                b'+' => Some(62),
+                b'/' => Some(63),
+                b'=' => Some(0),
+                _ => None,
+            };
+            let mut out = Vec::with_capacity(encoded.len() / 4 * 3);
+            let (mut quad, mut used, mut eof) = ([0u8; 4], 0, false);
+            for &c in encoded {
+                if matches!(c, b' ' | b'\t' | b'\r' | b'\n') {
+                    continue;
+                }
+                if eof {
+                    return None;
+                }
+                quad[used] = c;
+                used += 1;
+                if used < 4 {
+                    continue;
+                }
+                used = 0;
+                let v = quad
+                    .iter()
+                    .try_fold(0u32, |acc, &c| Some(acc << 6 | value(c)? as u32))?;
+                let len = match quad.map(|c| c == b'=') {
+                    [false, false, false, false] => 3,
+                    [false, false, false, true] => 2,
+                    [false, false, true, true] => 1,
+                    _ => return None,
+                };
+                out.extend_from_slice(&v.to_be_bytes()[1..1 + len]);
+                eof = len < 3;
+            }
+            (used == 0).then_some(out)
+        }
+
+        struct Block {
+            label: Vec<u8>,
+            header: Vec<u8>,
+            data: Vec<u8>,
+        }
+
+        /// Reads the next PEM block, like `PEM_read_bio_inner()`.
+        fn read_block(lines: &mut Lines) -> Option<Block> {
+            let label = loop {
+                let line = lines.next()?;
+                let label = c_str(&line)
+                    .strip_prefix(b"-----BEGIN ")
+                    .and_then(|rest| rest.strip_suffix(b"-----\n"));
+                if let Some(label) = label {
+                    break label.to_vec();
+                }
+            };
+            let (mut last, mut header, mut data) = (Vec::new(), Vec::new(), Vec::new());
+            if read_until_end(lines, &mut last, &mut header, true) {
+                read_until_end(lines, &mut last, &mut data, false);
+            } else {
+                // There was no header, so that was the body.
+                std::mem::swap(&mut header, &mut data);
+            }
+            if c_str(&last) != [b"-----END ".as_slice(), &label, b"-----\n"].concat() {
+                return None;
+            }
+            let data = decode_base64(&data)?;
+            (!data.is_empty()).then_some(Block {
+                label,
+                header,
+                data,
+            })
+        }
+
+        /// Returns the label and contents of the first block with a label we want, like `PEM_bytes_read_bio()`.
+        pub(super) fn read(
+            pem: &[u8],
+            accept: impl Fn(&[u8]) -> bool,
+        ) -> Option<(Vec<u8>, Vec<u8>)> {
+            let mut lines = Lines(pem);
+            loop {
+                let block = read_block(&mut lines)?;
+                if accept(&block.label) {
+                    // Headers only come with encrypted keys, and we never have a password.
+                    return block.header.is_empty().then_some((block.label, block.data));
+                }
+            }
+        }
+    }
+
+    fn pem_der(pem: &[u8], label: &[u8]) -> Result<Vec<u8>, ErrorStack> {
+        pem::read(pem, |x| x == label)
+            .map(|(_, der)| der)
+            .ok_or(ErrorStack::InvalidPublicKey)
+    }
+
+    fn i2osp(x: &rrsa::BoxedUint, k: usize) -> Vec<u8> {
+        let bytes = x.to_be_bytes();
+        let mut out = vec![0u8; k.saturating_sub(bytes.len())];
+        out.extend_from_slice(&bytes[bytes.len().saturating_sub(k)..]);
+        out
+    }
+
+    fn os2ip(input: &[u8], key: &impl rrsa::traits::PublicKeyParts) -> Option<rrsa::BoxedUint> {
+        if input.len() != key.size() {
+            return None;
+        }
+        let x = rrsa::BoxedUint::from_be_slice(input, key.n_bits_precision()).ok()?;
+        (x < *key.n().as_ref()).then_some(x)
+    }
+
+    /// Raw RSA with the public key, on input as long as the modulus and smaller than it.
+    pub(crate) fn raw_public_op(
+        rsa_key: &rrsa::PublicKey,
+        input: &[u8],
+    ) -> Result<Vec<u8>, ErrorStack> {
+        let m = os2ip(input, rsa_key).ok_or(ErrorStack::InvalidPublicKey)?;
+        let c = rrsa::hazmat::rsa_encrypt(rsa_key, &m).map_err(|_| ErrorStack::InvalidPublicKey)?;
+        Ok(i2osp(&c, rsa_key.size()))
+    }
+
+    /// Raw RSA with the private key, with blinding and a check against faults.
+    pub(crate) fn raw_private_op(
+        rsa_key: &rrsa::PrivateKey,
+        input: &[u8],
+    ) -> Result<Vec<u8>, ErrorStack> {
+        let c = os2ip(input, rsa_key).ok_or(ErrorStack::InvalidPrivateKey)?;
+        let m = rrsa::hazmat::rsa_decrypt_and_check(rsa_key, Some(&mut rand::rng()), &c)
+            .map_err(|_| ErrorStack::InvalidPrivateKey)?;
+        Ok(i2osp(&m, rsa_key.size()))
+    }
+
+    /// PKCS#1 v1.5 decryption that returns an error on bad padding, like BoringSSL.
+    ///
+    /// The rsa crate only returns a fake message in that case.
+    fn pkcs1v15_decrypt(
+        rsa_key: &rrsa::PrivateKey,
+        ciphertext: &[u8],
+    ) -> Result<Vec<u8>, ErrorStack> {
+        if rsa_key.size() < 11 {
+            return Err(ErrorStack::InvalidPrivateKey);
+        }
+        let mut em = raw_private_op(rsa_key, ciphertext)?;
+        let result = pkcs1v15_unpad(&em);
+        em.fill(0);
+        std::hint::black_box(&em);
+        result
+    }
+
+    fn pkcs1v15_unpad(em: &[u8]) -> Result<Vec<u8>, ErrorStack> {
+        use std::hint::black_box;
+
+        let msb = |a: usize| 0usize.wrapping_sub(a >> (usize::BITS - 1));
+        let is_zero = |a: usize| msb(!a & a.wrapping_sub(1));
+        let lt = |a: usize, b: usize| msb(a ^ ((a ^ b) | (a.wrapping_sub(b) ^ a)));
+        let select =
+            |mask: usize, a: usize, b: usize| (black_box(mask) & a) | (black_box(!mask) & b);
+
+        let first_byte_is_zero = is_zero(em[0] as usize);
+        let second_byte_is_two = is_zero(em[1] as usize ^ 2);
+        let mut zero_index = 0;
+        let mut looking_for_index = usize::MAX;
+        for (i, &byte) in em.iter().enumerate().skip(2) {
+            let equals0 = is_zero(byte as usize);
+            zero_index = select(looking_for_index & equals0, i, zero_index);
+            looking_for_index = select(equals0, 0, looking_for_index);
+        }
+        // 00 02, then at least 8 nonzero padding bytes, then a zero separator.
+        let valid =
+            first_byte_is_zero & second_byte_is_two & !looking_for_index & !lt(zero_index, 2 + 8);
+        if black_box(valid) == 0 {
+            return Err(ErrorStack::InvalidPrivateKey);
+        }
+        Ok(em[zero_index + 1..].to_vec())
     }
 
     impl Rsa<Public> {
         pub fn new() -> Self {
-            Rsa {
-                rsa_key: RsaKey::None,
-                _marker: std::marker::PhantomData,
-            }
-        }
-
-        pub fn size(&self) -> u32 {
-            let rsa_key = if let RsaKey::Public(x) = &self.rsa_key {
-                x
-            } else {
-                unreachable!();
-            };
-            rsa_key.size() as u32
-        }
-
-        pub fn bits(&self) -> u32 {
-            self.n().num_bits() as u32
+            Self::from_key(RsaKey::None)
         }
 
         /// Checks that the modulus and the public exponent are valid, with the
@@ -422,134 +921,58 @@ pub mod rsa {
         ///
         /// It does not enforce any application policy on the key size.
         pub fn check_key(&self) -> Result<bool, ErrorStack> {
-            let rsa_key = if let RsaKey::Public(x) = &self.rsa_key {
-                x
-            } else {
-                unreachable!();
-            };
-            Ok(public_parameters_are_valid(rsa_key.n(), rsa_key.e()))
+            Ok(match &self.rsa_key {
+                RsaKey::Public(x) => public_parameters_are_valid(x.n(), x.e()),
+                _ => false,
+            })
         }
 
         pub fn public_key_from_der(der: &[u8]) -> Result<Rsa<Public>, ErrorStack> {
-            let rsa_public_key = rrsa::RsaPublicKey::from_public_key_der(der)
-                .map_err(|_| ErrorStack::InvalidPublicKey)?;
-            let rsa_key = RsaKey::Public(rsa_public_key);
-            Ok(Rsa {
-                rsa_key,
-                _marker: std::marker::PhantomData,
-            })
+            let der = first_der_element(der).ok_or(ErrorStack::InvalidPublicKey)?;
+            public_key_from_spki_der(der).map(|x| Self::from_key(RsaKey::Public(x)))
         }
 
         pub fn public_key_from_der_pkcs1(der: &[u8]) -> Result<Rsa<Public>, ErrorStack> {
-            let rsa_public_key = rrsa::RsaPublicKey::from_pkcs1_der(der)
-                .map_err(|_| ErrorStack::InvalidPublicKey)?;
-            let rsa_key = RsaKey::Public(rsa_public_key);
-            Ok(Rsa {
-                rsa_key,
-                _marker: std::marker::PhantomData,
-            })
+            let der = first_der_element(der).ok_or(ErrorStack::InvalidPublicKey)?;
+            public_key_from_pkcs1_der(der).map(|x| Self::from_key(RsaKey::Public(x)))
         }
 
         pub fn public_key_from_pem(pem: &[u8]) -> Result<Rsa<Public>, ErrorStack> {
-            let rsa_pem = std::str::from_utf8(pem).map_err(|_| ErrorStack::InvalidPublicKey)?;
-            let rsa_public_key = rrsa::RsaPublicKey::from_public_key_pem(rsa_pem)
-                .map_err(|_| ErrorStack::InvalidPublicKey)?;
-            let rsa_key = RsaKey::Public(rsa_public_key);
-            Ok(Rsa {
-                rsa_key,
-                _marker: std::marker::PhantomData,
-            })
+            Self::public_key_from_der(&pem_der(pem, b"PUBLIC KEY")?)
         }
 
         pub fn public_key_from_pem_pkcs1(pem: &[u8]) -> Result<Rsa<Public>, ErrorStack> {
-            let rsa_pem = std::str::from_utf8(pem).map_err(|_| ErrorStack::InvalidPublicKey)?;
-            let rsa_public_key = rrsa::RsaPublicKey::from_pkcs1_pem(rsa_pem)
-                .map_err(|_| ErrorStack::InvalidPublicKey)?;
-            let rsa_key = RsaKey::Public(rsa_public_key);
-            Ok(Rsa {
-                rsa_key,
-                _marker: std::marker::PhantomData,
-            })
+            Self::public_key_from_der_pkcs1(&pem_der(pem, b"RSA PUBLIC KEY")?)
         }
 
+        /// Like BoringSSL, this accepts anything, and invalid keys only fail when they're checked or used.
         pub fn from_public_components(n: BigNum, e: BigNum) -> Result<Rsa<Public>, ErrorStack> {
-            let rsa_public_key = rrsa::RsaPublicKey::new(n.rsa_bn, e.rsa_bn)
-                .map_err(|_| ErrorStack::InvalidPublicKey)?;
-            let rsa_key = RsaKey::Public(rsa_public_key);
-            Ok(Rsa {
-                rsa_key,
-                _marker: std::marker::PhantomData,
-            })
-        }
-
-        pub fn n(&self) -> BigNum {
-            let rsa_key = if let RsaKey::Public(x) = &self.rsa_key {
-                x
-            } else {
-                unreachable!();
+            let rsa_key = match new_public_key(n.clone(), e.clone()) {
+                Ok(rsa_key) => RsaKey::Public(rsa_key),
+                Err(_) => RsaKey::Invalid(Box::new(InvalidKey {
+                    n,
+                    e,
+                    private: None,
+                    usable: None,
+                })),
             };
-            BigNum {
-                rsa_bn: rsa_key.n().clone(),
-            }
-        }
-
-        pub fn e(&self) -> BigNum {
-            let rsa_key = if let RsaKey::Public(x) = &self.rsa_key {
-                x
-            } else {
-                unreachable!();
-            };
-            BigNum {
-                rsa_bn: rsa_key.e().clone(),
-            }
+            Ok(Self::from_key(rsa_key))
         }
 
         pub fn public_key_to_der(&self) -> Result<Vec<u8>, ErrorStack> {
-            let rsa_key = if let RsaKey::Public(x) = &self.rsa_key {
-                x
-            } else {
-                unreachable!();
-            };
-            Ok(rsa_key
-                .to_public_key_der()
-                .map_err(|_| ErrorStack::InvalidPublicKey)?
-                .into_vec())
+            public_key_der(&self.n(), &self.e())
         }
 
         pub fn public_key_to_der_pkcs1(&self) -> Result<Vec<u8>, ErrorStack> {
-            let rsa_key = if let RsaKey::Public(x) = &self.rsa_key {
-                x
-            } else {
-                unreachable!();
-            };
-            Ok(rsa_key
-                .to_pkcs1_der()
-                .map_err(|_| ErrorStack::InvalidPublicKey)?
-                .into_vec())
+            public_key_der_pkcs1(&self.n(), &self.e())
         }
 
         pub fn public_key_to_pem(&self) -> Result<Vec<u8>, ErrorStack> {
-            let rsa_key = if let RsaKey::Public(x) = &self.rsa_key {
-                x
-            } else {
-                unreachable!();
-            };
-            Ok(rsa_key
-                .to_public_key_pem(Default::default())
-                .map_err(|_| ErrorStack::InvalidPublicKey)?
-                .into_bytes())
+            to_pem("PUBLIC KEY", &self.public_key_to_der()?)
         }
 
         pub fn public_key_to_pem_pkcs1(&self) -> Result<Vec<u8>, ErrorStack> {
-            let rsa_key = if let RsaKey::Public(x) = &self.rsa_key {
-                x
-            } else {
-                unreachable!();
-            };
-            Ok(rsa_key
-                .to_pkcs1_pem(Default::default())
-                .map_err(|_| ErrorStack::InvalidPublicKey)?
-                .into_bytes())
+            to_pem("RSA PUBLIC KEY", &self.public_key_to_der_pkcs1()?)
         }
 
         pub fn public_encrypt(
@@ -558,20 +981,19 @@ pub mod rsa {
             to: &mut [u8],
             padding: Padding,
         ) -> Result<usize, ErrorStack> {
-            let rsa_key = if let RsaKey::Public(x) = &self.rsa_key {
-                x
-            } else {
-                unreachable!();
-            };
-            let mut rng = rand::thread_rng();
+            let rsa_key = self
+                .rsa_key
+                .public_key()
+                .ok_or(ErrorStack::InvalidPublicKey)?;
+            let mut rng = rand::rng();
             let c = match padding.id {
-                PaddingId::None => panic!("Padding not set"),
+                PaddingId::None => raw_public_op(rsa_key, from)?,
                 PaddingId::Pkcs1 => rsa_key
                     .encrypt(&mut rng, rrsa::Pkcs1v15Encrypt, from)
                     .map_err(|_| ErrorStack::InvalidPublicKey)?,
-                PaddingId::Pkcs1Pss => panic!("Invalid padding for encryption"),
+                PaddingId::Pkcs1Pss => return Err(ErrorStack::KeyError),
                 PaddingId::Pkcs1Oaep => rsa_key
-                    .encrypt(&mut rng, rrsa::Oaep::new::<Sha1>(), from)
+                    .encrypt(&mut rng, rrsa::Oaep::<Sha1>::new(), from)
                     .map_err(|_| ErrorStack::InvalidPublicKey)?,
             };
             let len = c.len();
@@ -582,10 +1004,19 @@ pub mod rsa {
     }
 
     impl Rsa<Private> {
+        /// Like BoringSSL, the size is rounded down to a multiple of 128 bits, and has to end up between 512 and 16384 bits.
         pub fn generate(bits: u32) -> Result<Rsa<Private>, ErrorStack> {
-            match bits {
-                2048 | 3072 | 4096 => {}
-                _ => return Err(ErrorStack::UnsupportedModulus),
+            if bits > *MODULUS_BITS.end() as u32 {
+                return Err(ErrorStack::UnsupportedModulus);
+            }
+            let bits = bits & !127;
+            if bits < *MODULUS_BITS.start() as u32 {
+                return Err(ErrorStack::UnsupportedModulus);
+            }
+            // The rsa crate would refuse anything below 1024 bits.
+            let generate = || {
+                rrsa::PrivateKey::new_unchecked(&mut rand::rng(), bits as _)
+                    .map_err(|_| ErrorStack::InternalError)
             };
             #[cfg(not(all(
                 feature = "wasi-crypto",
@@ -593,11 +1024,7 @@ pub mod rsa {
                 target_os = "wasi",
                 target_env = "p1"
             )))]
-            let rsa_key = {
-                let mut rng = rand::thread_rng();
-                rrsa::RsaPrivateKey::new(&mut rng, bits as _)
-                    .map_err(|_| ErrorStack::InternalError)?
-            };
+            let rsa_key = generate()?;
             #[cfg(all(
                 feature = "wasi-crypto",
                 target_arch = "wasm32",
@@ -607,28 +1034,9 @@ pub mod rsa {
             let rsa_key = if let Some(rsa_key) = wasi_crypto::rsa_generate(bits)? {
                 rsa_key
             } else {
-                let mut rng = rand::thread_rng();
-                rrsa::RsaPrivateKey::new(&mut rng, bits as _)
-                    .map_err(|_| ErrorStack::InternalError)?
+                generate()?
             };
-            let rsa_key = RsaKey::Private(rsa_key);
-            Ok(Rsa {
-                rsa_key,
-                _marker: std::marker::PhantomData,
-            })
-        }
-
-        pub fn size(&self) -> u32 {
-            let rsa_key = if let RsaKey::Private(x) = &self.rsa_key {
-                x
-            } else {
-                unreachable!();
-            };
-            rsa_key.size() as u32
-        }
-
-        pub fn bits(&self) -> u32 {
-            self.n().num_bits() as u32
+            Ok(Self::from_key(RsaKey::Private(rsa_key)))
         }
 
         /// Checks the consistency of a private key, like BoringSSL's
@@ -637,34 +1045,22 @@ pub mod rsa {
         ///
         /// It does not enforce any application policy on the key size.
         pub fn check_key(&self) -> Result<bool, ErrorStack> {
-            let rsa_key = if let RsaKey::Private(x) = &self.rsa_key {
-                x
-            } else {
-                unreachable!();
-            };
-            if !public_parameters_are_valid(rsa_key.n(), rsa_key.e()) || rsa_key.d() >= rsa_key.n()
-            {
-                return Ok(false);
-            }
-            if rsa_key.validate().is_err() {
-                return Ok(false);
-            }
-            Ok(true)
+            Ok(match &self.rsa_key {
+                RsaKey::Private(x) => {
+                    public_parameters_are_valid(x.n(), x.e()) && x.validate().is_ok()
+                }
+                _ => false,
+            })
         }
 
         pub fn public_key(&self) -> Result<Rsa<Public>, ErrorStack> {
-            let n = self.n();
-            let e = self.e();
-            Rsa::from_public_components(n, e)
+            match &self.rsa_key {
+                RsaKey::Private(x) => Ok(Rsa::from_key(RsaKey::Public(x.to_public_key()))),
+                _ => Rsa::from_public_components(self.n(), self.e()),
+            }
         }
 
-        /// Builds a private key from all of its components, like BoringSSL.
-        ///
-        /// BoringSSL stores the CRT values as given and leaves their verification to
-        /// `check_key()`. The Rust backend can only store values it computes, so
-        /// it checks the supplied ones here instead of silently replacing them: `n = p * q`,
-        /// `d * e = 1` modulo `p - 1` and `q - 1`, `dmp1 = d mod (p - 1)`,
-        /// `dmq1 = d mod (q - 1)` and `iqmp = q^-1 mod p` must all hold.
+        /// Like BoringSSL, this accepts anything, and invalid keys only fail when they're checked or used.
         #[allow(clippy::too_many_arguments)]
         pub fn from_private_components(
             n: BigNum,
@@ -676,201 +1072,231 @@ pub mod rsa {
             dmq1: BigNum,
             iqmp: BigNum,
         ) -> Result<Rsa<Private>, ErrorStack> {
-            let rsa_key = rrsa::RsaPrivateKey::from_components(
-                n.rsa_bn,
-                e.rsa_bn,
-                d.rsa_bn,
-                vec![p.rsa_bn, q.rsa_bn],
-            )
-            .map_err(|_| ErrorStack::InvalidPrivateKey)?;
-            let consistent = rsa_key.dp() == Some(&dmp1.rsa_bn)
-                && rsa_key.dq() == Some(&dmq1.rsa_bn)
-                && rsa_key.crt_coefficient().as_ref() == Some(&iqmp.rsa_bn);
-            if !consistent {
-                return Err(ErrorStack::InvalidPrivateKey);
-            }
-            Ok(Rsa {
-                rsa_key: RsaKey::Private(rsa_key),
-                _marker: std::marker::PhantomData,
-            })
+            let private = PrivateParts {
+                d,
+                p,
+                q,
+                dmp1,
+                dmq1,
+                iqmp,
+            };
+            let rsa_key = match Self::checked_private_components(&n, &e, &private) {
+                Ok(rsa_key) => RsaKey::Private(rsa_key),
+                Err(_) => {
+                    let usable = Self::usable_despite_check_key(&n, &e, &private);
+                    RsaKey::Invalid(Box::new(InvalidKey {
+                        n,
+                        e,
+                        private: Some(private),
+                        usable,
+                    }))
+                }
+            };
+            Ok(Self::from_key(rsa_key))
         }
 
-        fn from_pkcs1_private_key(
-            key: &rrsa::pkcs1::RsaPrivateKey<'_>,
-        ) -> Result<Rsa<Private>, ErrorStack> {
+        /// BoringSSL can still use some keys that fail `check_key()`, because it only needs some of the components.
+        ///
+        /// It uses the CRT values when both primes have the same size in machine words, and `d` otherwise.
+        /// If those are right, a valid key gives the same results.
+        fn usable_despite_check_key(
+            n: &BigNum,
+            e: &BigNum,
+            private: &PrivateParts,
+        ) -> Option<rrsa::PrivateKey> {
+            let PrivateParts {
+                d,
+                p,
+                q,
+                dmp1,
+                dmq1,
+                iqmp,
+            } = private;
+            let words = |x: &BigNum| (x.rsa_bn.bit_width() as usize).div_ceil(usize::BITS as usize);
+            // Cheap checks first, so huge values never get to the math.
+            // BoringSSL also needs d, dmp1, dmq1 and iqmp to fit in the size of n, p, q and p.
+            let n_bits = n.rsa_bn.bit_width_vartime() as usize;
+            if !MODULUS_BITS.contains(&n_bits)
+                || p.rsa_bn >= n.rsa_bn
+                || q.rsa_bn >= n.rsa_bn
+                || words(d) > words(n)
+                || words(dmp1) > words(p)
+                || words(dmq1) > words(q)
+                || words(iqmp) > words(p)
+            {
+                return None;
+            }
+            if words(p) == words(q) {
+                let rsa_key = rrsa::PrivateKey::from_p_q(
+                    p.rsa_bn.clone(),
+                    q.rsa_bn.clone(),
+                    e.rsa_bn.clone(),
+                )
+                .ok()?;
+                (*rsa_key.n().as_ref() == n.rsa_bn && crt_values_match(&rsa_key, private))
+                    .then_some(rsa_key)
+            } else {
+                rrsa::PrivateKey::from_components_with_wide_primes(
+                    n.rsa_bn.clone(),
+                    e.rsa_bn.clone(),
+                    d.rsa_bn.clone(),
+                    vec![p.rsa_bn.clone(), q.rsa_bn.clone()],
+                )
+                .ok()
+            }
+        }
+
+        /// The rsa crate computes the CRT values itself, so the given ones have to match.
+        fn checked_private_components(
+            n: &BigNum,
+            e: &BigNum,
+            private: &PrivateParts,
+        ) -> Result<rrsa::PrivateKey, ErrorStack> {
+            let n_bits = n.rsa_bn.bit_width_vartime();
+            if !MODULUS_BITS.contains(&(n_bits as usize)) {
+                return Err(ErrorStack::InvalidPrivateKey);
+            }
+            // The rsa crate needs a slower constructor for primes of different sizes.
+            // Choosing it leaks that the key is unbalanced, but so does BoringSSL.
+            let half = n_bits.div_ceil(2);
+            let balanced =
+                private.p.rsa_bn.bit_width() <= half && private.q.rsa_bn.bit_width() <= half;
+            let from_components = if balanced {
+                rrsa::PrivateKey::from_components
+            } else {
+                rrsa::PrivateKey::from_components_with_wide_primes
+            };
+            let rsa_key = from_components(
+                n.rsa_bn.clone(),
+                e.rsa_bn.clone(),
+                private.d.rsa_bn.clone(),
+                vec![private.p.rsa_bn.clone(), private.q.rsa_bn.clone()],
+            )
+            .map_err(|_| ErrorStack::InvalidPrivateKey)?;
+            if !crt_values_match(&rsa_key, private) {
+                return Err(ErrorStack::InvalidPrivateKey);
+            }
+            Ok(rsa_key)
+        }
+
+        fn from_pkcs8_der(der: &[u8], strict: bool) -> Result<Rsa<Private>, ErrorStack> {
+            let key = pkcs8_rsa_private_key(der, strict).ok_or(ErrorStack::InvalidPrivateKey)?;
+            Self::from_pkcs1_der(key)
+        }
+
+        fn from_pkcs1_der(der: &[u8]) -> Result<Rsa<Private>, ErrorStack> {
+            let key = rrsa::pkcs1::RsaPrivateKeyRef::try_from(der)
+                .map_err(|_| ErrorStack::InvalidPrivateKey)?;
             if key.version() != rrsa::pkcs1::Version::TwoPrime {
                 return Err(ErrorStack::InvalidPrivateKey);
             }
-            let bn = |x: rrsa::pkcs1::UintRef<'_>| BigNum {
-                rsa_bn: rrsa::BigUint::from_bytes_be(x.as_bytes()),
+            let bn = |x: rrsa::pkcs1::UintRef<'_>| BigNum::from_slice(x.as_bytes());
+            let private = PrivateParts {
+                d: bn(key.private_exponent)?,
+                p: bn(key.prime1)?,
+                q: bn(key.prime2)?,
+                dmp1: bn(key.exponent1)?,
+                dmq1: bn(key.exponent2)?,
+                iqmp: bn(key.coefficient)?,
             };
-            Rsa::from_private_components(
-                bn(key.modulus),
-                bn(key.public_exponent),
-                bn(key.private_exponent),
-                bn(key.prime1),
-                bn(key.prime2),
-                bn(key.exponent1),
-                bn(key.exponent2),
-                bn(key.coefficient),
-            )
-        }
-
-        fn from_pkcs8_private_key(der: &[u8]) -> Result<Rsa<Private>, ErrorStack> {
-            let info = rrsa::pkcs8::PrivateKeyInfo::try_from(der)
-                .map_err(|_| ErrorStack::InvalidPrivateKey)?;
-            info.algorithm
-                .assert_algorithm_oid(rrsa::pkcs1::ALGORITHM_OID)
-                .map_err(|_| ErrorStack::InvalidPrivateKey)?;
-            let null: rrsa::pkcs8::der::asn1::AnyRef<'_> = rrsa::pkcs8::der::asn1::Null.into();
-            if info.algorithm.parameters_any().ok() != Some(null) {
-                return Err(ErrorStack::InvalidPrivateKey);
-            }
-            let key = rrsa::pkcs1::RsaPrivateKey::try_from(info.private_key)
-                .map_err(|_| ErrorStack::InvalidPrivateKey)?;
-            Self::from_pkcs1_private_key(&key)
+            let (n, e) = (bn(key.modulus)?, bn(key.public_exponent)?);
+            let rsa_key = Self::checked_private_components(&n, &e, &private)?;
+            Ok(Self::from_key(RsaKey::Private(rsa_key)))
         }
 
         /// Parses a PKCS#8 or PKCS#1 private key, checking every encoded value including
         /// the CRT parameters.
+        ///
+        /// Like BoringSSL, the first private key in the input is used, even if it's not RSA.
         pub fn private_key_from_pem(pem: &[u8]) -> Result<Rsa<Private>, ErrorStack> {
-            let rsa_pem = std::str::from_utf8(pem).map_err(|_| ErrorStack::InvalidPrivateKey)?;
-            let rsa_pem = rsa_pem.trim();
-            let (label, der) = rrsa::pkcs8::SecretDocument::from_pem(rsa_pem)
-                .map_err(|_| ErrorStack::InvalidPrivateKey)?;
-            match label {
-                "PRIVATE KEY" => Self::from_pkcs8_private_key(der.as_bytes()),
-                "RSA PRIVATE KEY" => {
-                    let key = rrsa::pkcs1::RsaPrivateKey::try_from(der.as_bytes())
-                        .map_err(|_| ErrorStack::InvalidPrivateKey)?;
-                    Self::from_pkcs1_private_key(&key)
+            const PRIVATE_KEY_LABELS: [&[u8]; 5] = [
+                b"PRIVATE KEY",
+                b"ENCRYPTED PRIVATE KEY",
+                b"RSA PRIVATE KEY",
+                b"EC PRIVATE KEY",
+                b"DSA PRIVATE KEY",
+            ];
+            let (label, der) = pem::read(pem, |label| PRIVATE_KEY_LABELS.contains(&label))
+                .ok_or(ErrorStack::InvalidPrivateKey)?;
+            let der = first_der_element(&der).ok_or(ErrorStack::InvalidPrivateKey)?;
+            match label.as_slice() {
+                b"PRIVATE KEY" => Self::from_pkcs8_der(der, true),
+                // BoringSSL also tries PKCS#8 here.
+                b"RSA PRIVATE KEY" => {
+                    Self::from_pkcs1_der(der).or_else(|_| Self::from_pkcs8_der(der, false))
                 }
                 _ => Err(ErrorStack::InvalidPrivateKey),
             }
         }
 
-        /// Parses a PKCS#8 or PKCS#1 private key, checking every encoded value including
-        /// the CRT parameters.
+        /// Parses a PKCS#1 private key, checking every value including the CRT parameters.
+        ///
+        /// Like BoringSSL, PKCS#8 isn't accepted, and anything after the key is ignored.
         pub fn private_key_from_der(der: &[u8]) -> Result<Rsa<Private>, ErrorStack> {
-            Self::from_pkcs8_private_key(der).or_else(|_| {
-                let key = rrsa::pkcs1::RsaPrivateKey::try_from(der)
-                    .map_err(|_| ErrorStack::InvalidPrivateKey)?;
-                Self::from_pkcs1_private_key(&key)
-            })
+            Self::from_pkcs1_der(first_der_element(der).ok_or(ErrorStack::InvalidPrivateKey)?)
         }
 
+        /// Serializes the key as PKCS#1, like BoringSSL.
         pub fn private_key_to_pem(&self) -> Result<Vec<u8>, ErrorStack> {
-            let rsa_key = if let RsaKey::Private(x) = &self.rsa_key {
-                x
-            } else {
-                unreachable!();
-            };
-            let bytes = rsa_key
-                .to_pkcs8_pem(Default::default())
-                .map_err(|_| ErrorStack::InvalidPrivateKey)?
-                .as_bytes()
-                .to_vec();
-            Ok(bytes)
+            to_pem("RSA PRIVATE KEY", &self.private_key_to_der()?)
         }
 
+        /// Serializes the key as PKCS#1, like BoringSSL.
         pub fn private_key_to_der(&self) -> Result<Vec<u8>, ErrorStack> {
-            let rsa_key = if let RsaKey::Private(x) = &self.rsa_key {
-                x
-            } else {
-                unreachable!();
-            };
-            let bytes = rsa_key
-                .to_pkcs8_der()
-                .map_err(|_| ErrorStack::InvalidPrivateKey)?
-                .as_bytes()
-                .to_vec();
-            Ok(bytes)
-        }
-
-        pub fn n(&self) -> BigNum {
-            let rsa_key = if let RsaKey::Private(x) = &self.rsa_key {
-                x
-            } else {
-                unreachable!();
-            };
-            BigNum {
-                rsa_bn: rsa_key.n().clone(),
+            match &self.rsa_key {
+                RsaKey::Private(x) => Ok(x
+                    .to_pkcs1_der()
+                    .map_err(|_| ErrorStack::InvalidPrivateKey)?
+                    .as_bytes()
+                    .to_vec()),
+                RsaKey::Invalid(x) => private_key_der(&x.n, &x.e, self.rsa_key.invalid_private()),
+                _ => unreachable!(),
             }
         }
 
         pub fn d(&self) -> BigNum {
-            let rsa_key = if let RsaKey::Private(x) = &self.rsa_key {
-                x
-            } else {
-                unreachable!();
-            };
-            BigNum {
-                rsa_bn: rsa_key.d().clone(),
-            }
-        }
-
-        pub fn e(&self) -> BigNum {
-            let rsa_key = if let RsaKey::Private(x) = &self.rsa_key {
-                x
-            } else {
-                unreachable!();
-            };
-            BigNum {
-                rsa_bn: rsa_key.e().clone(),
+            match &self.rsa_key {
+                RsaKey::Private(x) => bn(x.d()),
+                _ => self.rsa_key.invalid_private().d.clone(),
             }
         }
 
         pub fn p(&self) -> BigNum {
-            let rsa_key = if let RsaKey::Private(x) = &self.rsa_key {
-                x
-            } else {
-                unreachable!();
-            };
-            BigNum {
-                rsa_bn: rsa_key.primes()[0].clone(),
+            match &self.rsa_key {
+                RsaKey::Private(x) => bn(x.primes()[0].as_ref()),
+                _ => self.rsa_key.invalid_private().p.clone(),
             }
         }
 
         pub fn q(&self) -> BigNum {
-            let rsa_key = if let RsaKey::Private(x) = &self.rsa_key {
-                x
-            } else {
-                unreachable!();
-            };
-            BigNum {
-                rsa_bn: rsa_key.primes()[1].clone(),
+            match &self.rsa_key {
+                RsaKey::Private(x) => bn(x.primes()[1].as_ref()),
+                _ => self.rsa_key.invalid_private().q.clone(),
             }
         }
 
         /// `d mod (p - 1)`
         pub fn dmp1(&self) -> Option<BigNum> {
-            let rsa_key = if let RsaKey::Private(x) = &self.rsa_key {
-                x
-            } else {
-                unreachable!();
-            };
-            rsa_key.dp().map(|x| BigNum { rsa_bn: x.clone() })
+            match &self.rsa_key {
+                RsaKey::Private(x) => x.dp().map(bn),
+                _ => Some(self.rsa_key.invalid_private().dmp1.clone()),
+            }
         }
 
         /// `d mod (q - 1)`
         pub fn dmq1(&self) -> Option<BigNum> {
-            let rsa_key = if let RsaKey::Private(x) = &self.rsa_key {
-                x
-            } else {
-                unreachable!();
-            };
-            rsa_key.dq().map(|x| BigNum { rsa_bn: x.clone() })
+            match &self.rsa_key {
+                RsaKey::Private(x) => x.dq().map(bn),
+                _ => Some(self.rsa_key.invalid_private().dmq1.clone()),
+            }
         }
 
         /// `q^-1 mod p`
         pub fn iqmp(&self) -> Option<BigNum> {
-            let rsa_key = if let RsaKey::Private(x) = &self.rsa_key {
-                x
-            } else {
-                unreachable!();
-            };
-            rsa_key.qinv()?;
-            rsa_key.crt_coefficient().map(|x| BigNum { rsa_bn: x })
+            match &self.rsa_key {
+                RsaKey::Private(x) => x.qinv().map(|x| bn(&x.retrieve())),
+                _ => Some(self.rsa_key.invalid_private().iqmp.clone()),
+            }
         }
 
         pub fn private_decrypt(
@@ -879,20 +1305,16 @@ pub mod rsa {
             to: &mut [u8],
             padding: Padding,
         ) -> Result<usize, ErrorStack> {
-            let rsa_key = if let RsaKey::Private(x) = &self.rsa_key {
-                x
-            } else {
-                unreachable!();
-            };
-            let mut rng = rand::thread_rng();
+            let rsa_key = self
+                .rsa_key
+                .private_key()
+                .ok_or(ErrorStack::InvalidPrivateKey)?;
             let m = match padding.id {
-                PaddingId::None => panic!("Padding not set"),
-                PaddingId::Pkcs1 => rsa_key
-                    .decrypt_blinded(&mut rng, rrsa::Pkcs1v15Encrypt, from)
-                    .map_err(|_| ErrorStack::InvalidPrivateKey)?,
-                PaddingId::Pkcs1Pss => panic!("Invalid padding for decryption"),
+                PaddingId::None => raw_private_op(rsa_key, from)?,
+                PaddingId::Pkcs1 => pkcs1v15_decrypt(rsa_key, from)?,
+                PaddingId::Pkcs1Pss => return Err(ErrorStack::KeyError),
                 PaddingId::Pkcs1Oaep => rsa_key
-                    .decrypt_blinded(&mut rng, rrsa::Oaep::new::<Sha1>(), from)
+                    .decrypt_blinded(&mut rand::rng(), rrsa::Oaep::<Sha1>::new(), from)
                     .map_err(|_| ErrorStack::InvalidPrivateKey)?,
             };
             let len = m.len();
@@ -1044,7 +1466,7 @@ pub mod bn {
 
     #[derive(Clone, PartialEq, Eq)]
     pub struct BigNum {
-        pub rsa_bn: rrsa::BigUint,
+        pub rsa_bn: rrsa::BoxedUint,
     }
 
     impl std::fmt::Debug for BigNum {
@@ -1057,12 +1479,17 @@ pub mod bn {
 
     impl BigNum {
         pub fn from_slice(slice: &[u8]) -> Result<Self, ErrorStack> {
-            let rsa_bn = rrsa::BigUint::from_bytes_be(slice);
+            // crypto-bigint can't handle an integer with no limbs at all.
+            let rsa_bn = if slice.is_empty() {
+                rrsa::BoxedUint::zero()
+            } else {
+                rrsa::BoxedUint::from_be_slice_vartime(slice)
+            };
             Ok(BigNum { rsa_bn })
         }
 
         pub fn to_vec(&self) -> Vec<u8> {
-            self.rsa_bn.to_bytes_be()
+            self.rsa_bn.to_be_bytes_trimmed_vartime().into_vec()
         }
 
         pub fn to_owned(&self) -> Result<BigNum, ErrorStack> {
@@ -1071,7 +1498,7 @@ pub mod bn {
 
         /// Returns the number of significant bits in `self`.
         pub fn num_bits(&self) -> i32 {
-            self.rsa_bn.bits() as i32
+            self.rsa_bn.bit_width() as i32
         }
 
         /// Returns the size of `self` in bytes.
@@ -1138,6 +1565,15 @@ pub mod hash {
                 MessageDigest::Sha256 => Nid::SHA256,
                 MessageDigest::Sha384 => Nid::SHA384,
                 MessageDigest::Sha512 => Nid::SHA512,
+            }
+        }
+
+        /// The size of the digest in bytes.
+        pub fn size(&self) -> usize {
+            match self {
+                MessageDigest::Sha256 => 32,
+                MessageDigest::Sha384 => 48,
+                MessageDigest::Sha512 => 64,
             }
         }
 
@@ -1324,21 +1760,194 @@ pub mod sign {
         pub const MAXIMUM_LENGTH: RsaPssSaltlen = RsaPssSaltlen { len: -2 };
     }
 
-    #[derive(Clone, Default)]
+    #[derive(Clone)]
     pub enum AnyHash {
-        #[default]
-        None,
         Sha256(Sha256),
         Sha384(Sha384),
         Sha512(Sha512),
     }
 
+    impl AnyHash {
+        fn new(md: &MessageDigest) -> Self {
+            match md {
+                MessageDigest::Sha256 => AnyHash::Sha256(Sha256::new()),
+                MessageDigest::Sha384 => AnyHash::Sha384(Sha384::new()),
+                MessageDigest::Sha512 => AnyHash::Sha512(Sha512::new()),
+            }
+        }
+
+        fn update(&mut self, buf: &[u8]) {
+            match self {
+                AnyHash::Sha256(x) => x.update(buf),
+                AnyHash::Sha384(x) => x.update(buf),
+                AnyHash::Sha512(x) => x.update(buf),
+            }
+        }
+
+        fn finalize(&self) -> Vec<u8> {
+            match self {
+                AnyHash::Sha256(x) => x.finalize().to_vec(),
+                AnyHash::Sha384(x) => x.finalize().to_vec(),
+                AnyHash::Sha512(x) => x.finalize().to_vec(),
+            }
+        }
+    }
+
+    fn digest(md: &MessageDigest, parts: &[&[u8]]) -> Vec<u8> {
+        let mut h = AnyHash::new(md);
+        for part in parts {
+            h.update(part);
+        }
+        h.finalize()
+    }
+
+    fn mgf1(md: &MessageDigest, seed: &[u8], len: usize) -> Vec<u8> {
+        (0u32..)
+            .flat_map(|counter| digest(md, &[seed, &counter.to_be_bytes()]))
+            .take(len)
+            .collect()
+    }
+
+    // PSS is ported from BoringSSL, because the rsa crate can't use a different hash for MGF1, and handles salt lengths differently.
+
+    /// PSS encoding, ported from BoringSSL's `RSA_padding_add_PKCS1_PSS_mgf1()`.
+    /// `MAXIMUM_LENGTH` means the longest salt that fits.
+    fn pss_encode(
+        m_hash: &[u8],
+        md: &MessageDigest,
+        mgf1_md: &MessageDigest,
+        salt_len: RsaPssSaltlen,
+        mod_bits: usize,
+        k: usize,
+    ) -> Result<Vec<u8>, ErrorStack> {
+        let h_len = md.size();
+        let ms_bits = (mod_bits - 1) & 7;
+        let mut out = vec![0u8; k];
+        // The encoded message is one byte shorter when the modulus size is a multiple of 8 plus 1.
+        let em = if ms_bits == 0 {
+            &mut out[1..]
+        } else {
+            &mut out[..]
+        };
+        let em_len = em.len();
+        if em_len < h_len + 2 {
+            return Err(ErrorStack::InternalError);
+        }
+        let s_len = match salt_len.len {
+            -1 => h_len,
+            -2 => em_len - h_len - 2,
+            x => usize::try_from(x).map_err(|_| ErrorStack::InternalError)?,
+        };
+        if em_len - h_len - 2 < s_len {
+            return Err(ErrorStack::InternalError);
+        }
+        let mut salt = vec![0u8; s_len];
+        rand::fill(&mut salt);
+        let h = digest(md, &[&[0u8; 8], m_hash, &salt]);
+        let masked_db_len = em_len - h_len - 1;
+        em[..masked_db_len].copy_from_slice(&mgf1(mgf1_md, &h, masked_db_len));
+        let separator = em_len - s_len - h_len - 2;
+        em[separator] ^= 1;
+        for (x, s) in em[separator + 1..masked_db_len].iter_mut().zip(&salt) {
+            *x ^= s;
+        }
+        if ms_bits != 0 {
+            em[0] &= 0xff >> (8 - ms_bits);
+        }
+        em[masked_db_len..em_len - 1].copy_from_slice(&h);
+        em[em_len - 1] = 0xbc;
+        Ok(out)
+    }
+
+    /// PSS verification, ported from BoringSSL's `RSA_verify_PKCS1_PSS_mgf1()`.
+    /// `MAXIMUM_LENGTH` accepts any salt length.
+    fn pss_verify(
+        m_hash: &[u8],
+        md: &MessageDigest,
+        mgf1_md: &MessageDigest,
+        salt_len: RsaPssSaltlen,
+        mod_bits: usize,
+        em: &[u8],
+    ) -> bool {
+        let h_len = md.size();
+        let s_len = match salt_len.len {
+            -1 => Some(h_len),
+            -2 => None,
+            x => match usize::try_from(x) {
+                Ok(x) => Some(x),
+                Err(_) => return false,
+            },
+        };
+        let ms_bits = (mod_bits - 1) & 7;
+        if em[0] & (0xffu8 << ms_bits) != 0 {
+            return false;
+        }
+        let em = if ms_bits == 0 { &em[1..] } else { em };
+        let em_len = em.len();
+        if em_len < h_len + 2 || s_len.is_some_and(|s_len| em_len < h_len + s_len + 2) {
+            return false;
+        }
+        if em[em_len - 1] != 0xbc {
+            return false;
+        }
+        let masked_db_len = em_len - h_len - 1;
+        let h = &em[masked_db_len..em_len - 1];
+        let mut db = mgf1(mgf1_md, h, masked_db_len);
+        for (x, m) in db.iter_mut().zip(em) {
+            *x ^= m;
+        }
+        if ms_bits != 0 {
+            db[0] &= 0xff >> (8 - ms_bits);
+        }
+        // Zeros, a one, then the salt.
+        let mut salt_start = 0;
+        while db[salt_start] == 0 && salt_start < masked_db_len - 1 {
+            salt_start += 1;
+        }
+        if db[salt_start] != 1 {
+            return false;
+        }
+        salt_start += 1;
+        if s_len.is_some_and(|s_len| masked_db_len - salt_start != s_len) {
+            return false;
+        }
+        digest(md, &[&[0u8; 8], m_hash, &db[salt_start..]]) == h
+    }
+
+    fn pkcs1v15_scheme(md: &MessageDigest) -> rrsa::Pkcs1v15Sign {
+        match md {
+            MessageDigest::Sha256 => rrsa::Pkcs1v15Sign::new::<Sha256>(),
+            MessageDigest::Sha384 => rrsa::Pkcs1v15Sign::new::<Sha384>(),
+            MessageDigest::Sha512 => rrsa::Pkcs1v15Sign::new::<Sha512>(),
+        }
+    }
+
+    // Signers and verifiers refuse the same options as BoringSSL: only PKCS#1 v1.5 and PSS padding, and salt lengths and MGF1 hashes only with PSS.
+
+    fn check_signature_padding(padding: Padding) -> Result<(), ErrorStack> {
+        if padding == Padding::PKCS1 || padding == Padding::PKCS1_PSS {
+            Ok(())
+        } else {
+            Err(ErrorStack::KeyError)
+        }
+    }
+
+    fn check_pss_padding(padding: Padding) -> Result<(), ErrorStack> {
+        if padding == Padding::PKCS1_PSS {
+            Ok(())
+        } else {
+            Err(ErrorStack::KeyError)
+        }
+    }
+
+    /// The state and options signers and verifiers have in common.
     #[derive(Clone)]
-    pub struct Signer<'t, T> {
+    pub struct SignatureContext<'t, T, Op> {
         pub message_digest: MessageDigest,
         pub pkey_ref: &'t PKey<T>,
         pub padding: Padding,
         pub salt_len: RsaPssSaltlen,
+        pub mgf1_md: Option<MessageDigest>,
         pub any_hash: AnyHash,
         #[cfg(all(
             feature = "wasi-crypto",
@@ -1347,24 +1956,27 @@ pub mod sign {
             target_env = "p1"
         ))]
         pub wasi_buf: Vec<u8>,
+        _op: std::marker::PhantomData<Op>,
     }
 
-    impl<'t, T> Signer<'t, T> {
-        pub fn new(type_: MessageDigest, pkey: &'t PKey<T>) -> Result<Signer<'t, T>, ErrorStack>
-        where
-            T: HasPrivate,
-        {
-            let any_hash = match type_ {
-                MessageDigest::Sha256 => AnyHash::Sha256(Sha256::new()),
-                MessageDigest::Sha384 => AnyHash::Sha384(Sha384::new()),
-                MessageDigest::Sha512 => AnyHash::Sha512(Sha512::new()),
-            };
-            Ok(Signer {
+    #[derive(Clone)]
+    pub enum Sign {}
+
+    #[derive(Clone)]
+    pub enum Verify {}
+
+    pub type Signer<'t, T> = SignatureContext<'t, T, Sign>;
+    pub type Verifier<'t, T> = SignatureContext<'t, T, Verify>;
+
+    impl<'t, T, Op> SignatureContext<'t, T, Op> {
+        fn with_digest(type_: MessageDigest, pkey: &'t PKey<T>) -> Self {
+            SignatureContext {
+                any_hash: AnyHash::new(&type_),
                 message_digest: type_,
                 pkey_ref: pkey,
-                padding: Padding::NONE,
+                padding: Padding::PKCS1,
                 salt_len: RsaPssSaltlen::default(),
-                any_hash,
+                mgf1_md: None,
                 #[cfg(all(
                     feature = "wasi-crypto",
                     target_arch = "wasm32",
@@ -1372,10 +1984,12 @@ pub mod sign {
                     target_env = "p1"
                 ))]
                 wasi_buf: Vec::new(),
-            })
+                _op: std::marker::PhantomData,
+            }
         }
 
         pub fn set_rsa_padding(&mut self, padding: Padding) -> Result<(), ErrorStack> {
+            check_signature_padding(padding)?;
             self.padding = padding;
             Ok(())
         }
@@ -1385,15 +1999,22 @@ pub mod sign {
         }
 
         pub fn set_rsa_pss_saltlen(&mut self, len: RsaPssSaltlen) -> Result<(), ErrorStack> {
+            check_pss_padding(self.padding)?;
+            if len.len < -2 {
+                return Err(ErrorStack::KeyError);
+            }
             self.salt_len = len;
             Ok(())
         }
 
         pub fn rsa_pss_saltlen(&self) -> Result<RsaPssSaltlen, ErrorStack> {
+            check_pss_padding(self.padding)?;
             Ok(self.salt_len)
         }
 
-        pub fn set_rsa_mgf1_md(&mut self, _md: MessageDigest) -> Result<(), ErrorStack> {
+        pub fn set_rsa_mgf1_md(&mut self, md: MessageDigest) -> Result<(), ErrorStack> {
+            check_pss_padding(self.padding)?;
+            self.mgf1_md = Some(md);
             Ok(())
         }
 
@@ -1405,28 +2026,33 @@ pub mod sign {
                 target_env = "p1"
             ))]
             self.wasi_buf.extend_from_slice(buf);
-            match &mut self.any_hash {
-                AnyHash::None => unreachable!("AnyHash::None"),
-                AnyHash::Sha256(x) => x.update(buf),
-                AnyHash::Sha384(x) => x.update(buf),
-                AnyHash::Sha512(x) => x.update(buf),
-            };
+            self.any_hash.update(buf);
             Ok(())
+        }
+
+        fn rsa_key(&self) -> &RsaKey {
+            let PKey::Rsa(rsa) = self.pkey_ref else {
+                unreachable!();
+            };
+            &rsa.rsa_key
+        }
+
+        fn mgf1_md(&self) -> &MessageDigest {
+            self.mgf1_md.as_ref().unwrap_or(&self.message_digest)
+        }
+    }
+
+    impl<'t, T> Signer<'t, T> {
+        pub fn new(type_: MessageDigest, pkey: &'t PKey<T>) -> Result<Signer<'t, T>, ErrorStack>
+        where
+            T: HasPrivate,
+        {
+            Ok(Self::with_digest(type_, pkey))
         }
 
         #[allow(clippy::len_without_is_empty)]
         pub fn len(&self) -> Result<usize, ErrorStack> {
-            let rsa_key = if let PKey::Rsa(x) = self.pkey_ref {
-                x
-            } else {
-                unreachable!();
-            };
-            let rsa_key = if let RsaKey::Private(x) = &rsa_key.rsa_key {
-                x
-            } else {
-                unreachable!();
-            };
-            Ok(rsa_key.size())
+            Ok(self.rsa_key().size())
         }
 
         pub fn sign(&self, buf: &mut [u8]) -> Result<usize, ErrorStack> {
@@ -1439,16 +2065,11 @@ pub mod sign {
         }
 
         pub fn sign_to_vec(&self) -> Result<Vec<u8>, ErrorStack> {
-            let rsa_key = if let PKey::Rsa(x) = self.pkey_ref {
-                x
-            } else {
-                unreachable!();
-            };
-            let rsa_key = if let RsaKey::Private(x) = &rsa_key.rsa_key {
-                x
-            } else {
-                unreachable!();
-            };
+            check_signature_padding(self.padding)?;
+            let rsa_key = self
+                .rsa_key()
+                .private_key()
+                .ok_or(ErrorStack::InvalidPrivateKey)?;
             #[cfg(all(
                 feature = "wasi-crypto",
                 target_arch = "wasm32",
@@ -1459,86 +2080,31 @@ pub mod sign {
                 rsa_key,
                 self.padding,
                 &self.message_digest,
+                self.mgf1_md(),
                 self.salt_len,
                 &self.wasi_buf,
             )? {
                 return Ok(sig);
             }
-            let mut rng = rand::thread_rng();
-            let rsa_key = rsa_key.clone();
-            match self.padding {
-                Padding::NONE => panic!("Padding not set"),
-                Padding::PKCS1 => match self.any_hash {
-                    AnyHash::None => unreachable!("AnyHash::None"),
-                    AnyHash::Sha256(x) => {
-                        let signing_key = rrsa::pkcs1v15::SigningKey::<Sha256>::new(rsa_key);
-                        Ok(signing_key
-                            .sign_digest_with_rng(&mut rng, x)
-                            .to_bytes()
-                            .into_vec())
-                    }
-                    AnyHash::Sha384(x) => {
-                        let signing_key = rrsa::pkcs1v15::SigningKey::<Sha384>::new(rsa_key);
-                        Ok(signing_key
-                            .sign_digest_with_rng(&mut rng, x)
-                            .to_bytes()
-                            .into_vec())
-                    }
-                    AnyHash::Sha512(x) => {
-                        let signing_key = rrsa::pkcs1v15::SigningKey::<Sha512>::new(rsa_key);
-                        Ok(signing_key
-                            .sign_digest_with_rng(&mut rng, x)
-                            .to_bytes()
-                            .into_vec())
-                    }
-                },
-                Padding::PKCS1_PSS => {
-                    let hash_len = match self.message_digest {
-                        MessageDigest::Sha256 => 32,
-                        MessageDigest::Sha384 => 48,
-                        MessageDigest::Sha512 => 64,
-                    };
-                    let salt_len = match self.salt_len.len {
-                        -1 => hash_len,
-                        -2 => rsa_key.size() - hash_len - 2,
-                        x => x as _,
-                    };
-                    match self.any_hash {
-                        AnyHash::None => unreachable!("AnyHash::None"),
-                        AnyHash::Sha256(x) => {
-                            let signing_key =
-                                rrsa::pss::BlindedSigningKey::<Sha256>::new_with_salt_len(
-                                    rsa_key, salt_len,
-                                );
-                            Ok(signing_key
-                                .sign_digest_with_rng(&mut rng, x)
-                                .to_bytes()
-                                .into_vec())
-                        }
-                        AnyHash::Sha384(x) => {
-                            let signing_key =
-                                rrsa::pss::BlindedSigningKey::<Sha384>::new_with_salt_len(
-                                    rsa_key, salt_len,
-                                );
-                            Ok(signing_key
-                                .sign_digest_with_rng(&mut rng, x)
-                                .to_bytes()
-                                .into_vec())
-                        }
-                        AnyHash::Sha512(x) => {
-                            let signing_key =
-                                rrsa::pss::BlindedSigningKey::<Sha512>::new_with_salt_len(
-                                    rsa_key, salt_len,
-                                );
-                            Ok(signing_key
-                                .sign_digest_with_rng(&mut rng, x)
-                                .to_bytes()
-                                .into_vec())
-                        }
-                    }
-                }
-                Padding::PKCS1_OAEP => panic!("Invalid padding for signing"),
+            let hashed = self.any_hash.finalize();
+            if self.padding == Padding::PKCS1_PSS {
+                let em = pss_encode(
+                    &hashed,
+                    &self.message_digest,
+                    self.mgf1_md(),
+                    self.salt_len,
+                    rsa_key.n().bit_width_vartime() as usize,
+                    rsa_key.size(),
+                )?;
+                return raw_private_op(rsa_key, &em);
             }
+            rsa_key
+                .sign_with_rng(
+                    &mut rand::rng(),
+                    pkcs1v15_scheme(&self.message_digest),
+                    &hashed,
+                )
+                .map_err(|_| ErrorStack::InternalError)
         }
 
         pub fn sign_oneshot(
@@ -1556,97 +2122,18 @@ pub mod sign {
         }
     }
 
-    #[derive(Clone)]
-    pub struct Verifier<'t, T> {
-        pub message_digest: MessageDigest,
-        pub pkey_ref: &'t PKey<T>,
-        pub padding: Padding,
-        pub salt_len: RsaPssSaltlen,
-        pub any_hash: AnyHash,
-        #[cfg(all(
-            feature = "wasi-crypto",
-            target_arch = "wasm32",
-            target_os = "wasi",
-            target_env = "p1"
-        ))]
-        pub wasi_buf: Vec<u8>,
-    }
-
     impl<'t, T> Verifier<'t, T> {
         pub fn new(type_: MessageDigest, pkey: &'t PKey<T>) -> Result<Verifier<'t, T>, ErrorStack>
         where
             T: HasPublic,
         {
-            let any_hash = match type_ {
-                MessageDigest::Sha256 => AnyHash::Sha256(Sha256::new()),
-                MessageDigest::Sha384 => AnyHash::Sha384(Sha384::new()),
-                MessageDigest::Sha512 => AnyHash::Sha512(Sha512::new()),
-            };
-            Ok(Verifier {
-                message_digest: type_,
-                pkey_ref: pkey,
-                padding: Padding::NONE,
-                salt_len: RsaPssSaltlen::default(),
-                any_hash,
-                #[cfg(all(
-                    feature = "wasi-crypto",
-                    target_arch = "wasm32",
-                    target_os = "wasi",
-                    target_env = "p1"
-                ))]
-                wasi_buf: Vec::new(),
-            })
-        }
-
-        pub fn set_rsa_padding(&mut self, padding: Padding) -> Result<(), ErrorStack> {
-            self.padding = padding;
-            Ok(())
-        }
-
-        pub fn rsa_padding(&self) -> Result<Padding, ErrorStack> {
-            Ok(self.padding)
-        }
-
-        pub fn set_rsa_pss_saltlen(&mut self, len: RsaPssSaltlen) -> Result<(), ErrorStack> {
-            self.salt_len = len;
-            Ok(())
-        }
-
-        pub fn rsa_pss_saltlen(&self) -> Result<RsaPssSaltlen, ErrorStack> {
-            Ok(self.salt_len)
-        }
-
-        pub fn set_rsa_mgf1_md(&mut self, _md: MessageDigest) -> Result<(), ErrorStack> {
-            Ok(())
-        }
-
-        pub fn update(&mut self, buf: &[u8]) -> Result<(), ErrorStack> {
-            #[cfg(all(
-                feature = "wasi-crypto",
-                target_arch = "wasm32",
-                target_os = "wasi",
-                target_env = "p1"
-            ))]
-            self.wasi_buf.extend_from_slice(buf);
-            match &mut self.any_hash {
-                AnyHash::None => unreachable!("AnyHash::None"),
-                AnyHash::Sha256(x) => x.update(buf),
-                AnyHash::Sha384(x) => x.update(buf),
-                AnyHash::Sha512(x) => x.update(buf),
-            };
-            Ok(())
+            Ok(Self::with_digest(type_, pkey))
         }
 
         pub fn verify(&self, signature: &[u8]) -> Result<bool, ErrorStack> {
-            let rsa_key = if let PKey::Rsa(x) = self.pkey_ref {
-                x
-            } else {
-                unreachable!();
-            };
-            let rsa_key = if let RsaKey::Public(x) = &rsa_key.rsa_key {
-                x
-            } else {
-                unreachable!();
+            check_signature_padding(self.padding)?;
+            let Some(rsa_key) = self.rsa_key().public_key() else {
+                return Ok(false);
             };
             #[cfg(all(
                 feature = "wasi-crypto",
@@ -1658,81 +2145,30 @@ pub mod sign {
                 rsa_key,
                 self.padding,
                 &self.message_digest,
+                self.mgf1_md(),
                 self.salt_len,
                 &self.wasi_buf,
                 signature,
             )? {
                 return Ok(ok);
             }
-            let rsa_key = rsa_key.clone();
-            match self.padding {
-                Padding::NONE => panic!("Padding not set"),
-                Padding::PKCS1 => {
-                    let rsa_signature = match rrsa::pkcs1v15::Signature::try_from(signature) {
-                        Ok(x) => x,
-                        Err(_) => return Ok(false),
-                    };
-                    match self.any_hash {
-                        AnyHash::None => unreachable!("AnyHash::None"),
-                        AnyHash::Sha256(x) => {
-                            let verifying_key =
-                                rrsa::pkcs1v15::VerifyingKey::<Sha256>::new(rsa_key);
-                            Ok(verifying_key.verify_digest(x, &rsa_signature).is_ok())
-                        }
-                        AnyHash::Sha384(x) => {
-                            let verifying_key =
-                                rrsa::pkcs1v15::VerifyingKey::<Sha384>::new(rsa_key);
-                            Ok(verifying_key.verify_digest(x, &rsa_signature).is_ok())
-                        }
-                        AnyHash::Sha512(x) => {
-                            let verifying_key =
-                                rrsa::pkcs1v15::VerifyingKey::<Sha512>::new(rsa_key);
-                            Ok(verifying_key.verify_digest(x, &rsa_signature).is_ok())
-                        }
-                    }
-                }
-                Padding::PKCS1_PSS => {
-                    let hash_len = match self.message_digest {
-                        MessageDigest::Sha256 => 32,
-                        MessageDigest::Sha384 => 48,
-                        MessageDigest::Sha512 => 64,
-                    };
-                    let salt_len = match self.salt_len.len {
-                        -1 => hash_len,
-                        -2 => rsa_key.size() - hash_len - 2,
-                        x => x as _,
-                    };
-                    let rsa_signature = match rrsa::pss::Signature::try_from(signature) {
-                        Ok(x) => x,
-                        Err(_) => return Ok(false),
-                    };
-                    match self.any_hash {
-                        AnyHash::None => unreachable!("AnyHash::None"),
-                        AnyHash::Sha256(x) => {
-                            let verifying_key =
-                                rrsa::pss::VerifyingKey::<Sha256>::new_with_salt_len(
-                                    rsa_key, salt_len,
-                                );
-                            Ok(verifying_key.verify_digest(x, &rsa_signature).is_ok())
-                        }
-                        AnyHash::Sha384(x) => {
-                            let verifying_key =
-                                rrsa::pss::VerifyingKey::<Sha384>::new_with_salt_len(
-                                    rsa_key, salt_len,
-                                );
-                            Ok(verifying_key.verify_digest(x, &rsa_signature).is_ok())
-                        }
-                        AnyHash::Sha512(x) => {
-                            let verifying_key =
-                                rrsa::pss::VerifyingKey::<Sha512>::new_with_salt_len(
-                                    rsa_key, salt_len,
-                                );
-                            Ok(verifying_key.verify_digest(x, &rsa_signature).is_ok())
-                        }
-                    }
-                }
-                Padding::PKCS1_OAEP => panic!("Invalid padding for verification"),
+            let hashed = self.any_hash.finalize();
+            if self.padding == Padding::PKCS1_PSS {
+                let Ok(em) = raw_public_op(rsa_key, signature) else {
+                    return Ok(false);
+                };
+                return Ok(pss_verify(
+                    &hashed,
+                    &self.message_digest,
+                    self.mgf1_md(),
+                    self.salt_len,
+                    rsa_key.n().bit_width_vartime() as usize,
+                    &em,
+                ));
             }
+            Ok(rsa_key
+                .verify(pkcs1v15_scheme(&self.message_digest), &hashed, signature)
+                .is_ok())
         }
 
         pub fn verify_oneshot(&mut self, signature: &[u8], buf: &[u8]) -> Result<bool, ErrorStack> {
@@ -2209,9 +2645,8 @@ pub mod mldsa {
         pub fn generate(
             algorithm: Algorithm,
         ) -> Result<(MlDsaPublicKey, MlDsaPrivateKey), ErrorStack> {
-            use rand::RngCore as _;
             let mut seed = [0u8; 32];
-            rand::thread_rng().fill_bytes(&mut seed);
+            rand::fill(&mut seed);
             let privkey = Self::from_seed(algorithm, &seed);
             seed.fill(0);
             let privkey = privkey?;

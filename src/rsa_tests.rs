@@ -1,10 +1,12 @@
-//! RSA tests with fixed keys: key checks, compared with what BoringSSL's `RSA_check_key()`
-//! accepts, and OAEP, compared with OpenSSL.
+//! RSA tests with fixed keys, checking that we accept and reject the same things as BoringSSL.
 
 use crate::bn::BigNum;
+use crate::hash::MessageDigest;
 use crate::implementation::hex;
+use crate::pkey::PKey;
 use crate::reexports::rsa as rrsa;
 use crate::rsa::{Padding, Rsa, RsaKey};
+use crate::sign::{RsaPssSaltlen, Signer, Verifier};
 
 // Generated with `openssl genpkey` (OpenSSL 3.6.4).
 const RSA_1024_PEM: &str = "-----BEGIN RSA PRIVATE KEY-----
@@ -84,50 +86,61 @@ EVfrzCtt7lv2rLjRffVd2QrUj2dz2mwCjGElVnmUTNhMLiCDMlk8RlGx5ttmtlDY
 W7WFfVbGturN102aT26NTbOyNChk6+ctxl41SfuqOhsiy9IPzgThuRYucHaN1y+c
 qq7GK7HB2mIhttRV6FpMonxQ+GcU5ty8RdVxHKKu24x6/YZVkCU=
 -----END RSA PRIVATE KEY-----";
+// 1024 bits, with primes of 400 and 624 bits.
+const RSA_UNBALANCED_PEM: &str = "-----BEGIN RSA PRIVATE KEY-----
+MIICTQIBAAKBgQDNzCe1ZCLg0o/Psp+A88L4es/IVZiQwG/qwRptaJba02duHjox
+LTdSguFqQLv8RIlNI8WsjQdR4WH9aThDFEFQpCJhlZS9lhiEKgBECHLNEoQXlPD9
+lIsABb1R05T+LirK1q9KTBC/16v9ZPSLQ6d6WxXVf/ZueLbJhTFn8ACjpwIDAQAB
+AoGAK6oCTtE1OUBTtPywLPsLRg9AoL/Qg/3ggQ2Bnu8O+tTZ4BpXvHFciIwuaY3c
+lNSx0QT2mtHUNK+h1XDIc0N46Y1bT9QpJW2ZHYvsktlbgLcwLdCAi/VVY66d4fKO
+hoxzAitmtbungCYM9DDDKPiAHG0P8fBzb1mAIBYSCHJZ2dECMwD7z3hdeX+pZQvq
+KUpuwSYv2eO/0rALLgF3FTYex3V+x/VuV4fms0F8eK4yvaaeTzNmmQJPANE4tADi
+kpgUOpZufisXyLy21dWqAIk98fTyh8QhTHShesjmWY7vya2NJDV0cuvFI8H0fgxq
+cOGH1Sni036NwCC4iUMBaTklPMdngsAEPwIyD+sisc4PevbvVOM9WFkPf/DnS+YW
+yO4km5GUtUdorxYW9t3DsprcZfD/GigRE2rwVekCThAMXGpQ9tOpgZD2asEdcu1e
+zOo1vxLH6J5UWCuoLjgoBsYQPUBkjkC8udFL3GDPX13KRjznkT8Lb0NmPbjQYLNh
+1E2KdyrF+3KEMxhNewIyE7ic4qLFa/HoQR5zwK50AcyrH3hfUFJW3nWjd10jYEeQ
+sMSBs5N0FBIeyHjs1X6CSg8=
+-----END RSA PRIVATE KEY-----";
+// 1025 bits, so PSS messages are one byte shorter than the modulus.
+const RSA_1025_PEM: &str = "-----BEGIN RSA PRIVATE KEY-----
+MIICXAIBAAKBgQHUigW/b90RvKzziqqMsEDzV8jAqgHn/VHC1IrKW9eyLtSSQGvR
+z0eZNSnpOlp58+lZ7HU2D7Y63QbiQxCFVnAQv6O/Rr+UGHfedzkAZ862igCBLxwo
+5JDVQrx0KsN0sTViET5i3D56xaSUCtBabN7vf6yzSTVe8mOLTkfdaGZWSwIDAQAB
+AoGASXgVG6YqV6AqzIuXX7U5kg7XU2K1JtABlJfoZX/OTEnsmjxQy9cBZqQ//Kri
+ShI1qpyZ6o6/J+7FqBAVFJtvubWcznTQY7YPpUi3cHbSxg3rF0NQPqjLhf5M79bi
+1O+Yol6sxCj0c9030ZwLfmPhGMEp9bjg4TxDALs3vrIrEAECQQD2PpWyFOfsd7lg
+G3/gGu8POxNyi5XhUC4nsf6Z/wzW1unNf4cxUJocc+yC5eSITNuRSjPch6ZiCuMB
+KuZIMFABAkEB5xn0KwjZRlw1Rgeps6bz91k46i1NxWGKcx28rc81iL7m4zlDbgft
+P8+kW672M4CJew2Q2pv02G70ADmtel7mSwJBAJ7929PG0dSJnQSj3NYLLe2snCrq
+W5TGG3b/4z71Qgn5a66Gt/isbUUPyFbgLsWesmpF+eRbJZ/KHbYkR9m2cAECQAb0
+7+/NaI0AtCIT6fCO6d0WgSGXFA1Fn1yViCRTWUhisZl9L+Faa6EFritBDHMf2tbP
+EsqMf6q3qvR13mxo/pECQGuhq3m8KTc5BjkwT/+pMw8c35V0XZgGZ15Lq8fGAGqh
+dCLnDlMJ2n4NEIHhWGpRMvqHIHDVi9QTUH++quK0bVU=
+-----END RSA PRIVATE KEY-----";
 
-fn private_key(rsa_key: rrsa::RsaPrivateKey) -> Rsa<crate::pkey::Private> {
-    Rsa {
-        rsa_key: RsaKey::Private(rsa_key),
-        _marker: std::marker::PhantomData,
-    }
-}
-
-#[test]
-fn check_key_does_not_enforce_a_size_policy() {
-    for pem in [RSA_1024_PEM, RSA_2560_PEM] {
-        let sk = Rsa::private_key_from_pem(pem.as_bytes()).unwrap();
-        assert!(sk.check_key().unwrap());
-        let pk = sk.public_key().unwrap();
-        assert!(pk.check_key().unwrap());
-    }
-    let sk = Rsa::private_key_from_pem(RSA_2560_PEM.as_bytes()).unwrap();
-    assert_eq!(sk.bits(), 2560);
-}
-
-#[test]
-fn check_key_rejects_d_not_below_n() {
-    use rrsa::traits::{PrivateKeyParts, PublicKeyParts};
-
-    let sk = Rsa::private_key_from_pem(RSA_1024_PEM.as_bytes()).unwrap();
-    let RsaKey::Private(key) = &sk.rsa_key else {
-        unreachable!()
-    };
-    let (n, e) = (key.n().clone(), key.e().clone());
-    let (p, q) = (key.primes()[0].clone(), key.primes()[1].clone());
-    let one = rrsa::BigUint::from(1u8);
-    let phi = (&p - &one) * (&q - &one);
-    // Still an inverse of e modulo p - 1 and q - 1, but larger than n.
-    let d = key.d() + &phi * 2u8;
-    assert!(d >= n);
-    let big_d = rrsa::RsaPrivateKey::from_components(n, e, d, vec![p, q]).unwrap();
-    assert!(!private_key(big_d).check_key().unwrap());
+/// An invalid key keeps its components, but fails `check_key()` and can't be used.
+fn assert_unusable(sk: &Rsa<crate::pkey::Private>, c: &[Vec<u8>; 8]) {
+    assert!(!sk.check_key().unwrap());
+    assert_eq!(&components(sk), c);
+    // 0 and 1 would still decrypt with some broken keys in BoringSSL.
+    let k = sk.size() as usize;
+    let input = [vec![0u8; k - 1], vec![0x42]].concat();
+    let mut plaintext = vec![0u8; k];
+    assert!(sk
+        .private_decrypt(&input, &mut plaintext, Padding::NONE)
+        .is_err());
+    let pkey = PKey::from_rsa(sk.clone()).unwrap();
+    let mut signer = Signer::new(MessageDigest::sha256(), &pkey).unwrap();
+    assert!(signer.sign_oneshot_to_vec(b"unusable").is_err());
 }
 
 #[test]
 fn check_key_rejects_tiny_moduli() {
-    let mut rng = rand::thread_rng();
-    let tiny = rrsa::RsaPrivateKey::new(&mut rng, 504).unwrap();
-    let tiny = private_key(tiny);
+    let tiny: Rsa<crate::pkey::Private> = Rsa {
+        rsa_key: RsaKey::Private(rrsa::PrivateKey::new_unchecked(&mut rand::rng(), 504).unwrap()),
+        _marker: std::marker::PhantomData,
+    };
     assert!(!tiny.check_key().unwrap());
     assert!(!tiny.public_key().unwrap().check_key().unwrap());
 }
@@ -173,9 +186,13 @@ fn from_components(
 }
 
 #[test]
-fn private_components_round_trip() {
-    for pem in [RSA_1024_PEM, RSA_2560_PEM] {
+fn valid_keys() {
+    for pem in [RSA_1024_PEM, RSA_1025_PEM, RSA_2560_PEM, RSA_UNBALANCED_PEM] {
         let sk = Rsa::private_key_from_pem(pem.as_bytes()).unwrap();
+        assert!(sk.check_key().unwrap());
+        let pk = sk.public_key().unwrap();
+        assert!(pk.check_key().unwrap());
+
         let c = components(&sk);
         let rebuilt = from_components(&c).unwrap();
         assert!(rebuilt.check_key().unwrap());
@@ -184,85 +201,93 @@ fn private_components_round_trip() {
             rebuilt.private_key_to_der().unwrap(),
             sk.private_key_to_der().unwrap()
         );
+
+        let pkey = PKey::from_rsa(pk).unwrap();
+        let mut verifier = Verifier::new(MessageDigest::sha256(), &pkey).unwrap();
+        let signature = sign(&rebuilt, b"valid");
+        assert!(verifier.verify_oneshot(&signature, b"valid").unwrap());
     }
+    let sk = Rsa::private_key_from_pem(RSA_2560_PEM.as_bytes()).unwrap();
+    assert_eq!(sk.bits(), 2560);
+    let sk = Rsa::private_key_from_pem(RSA_UNBALANCED_PEM.as_bytes()).unwrap();
+    assert_eq!((sk.p().num_bits(), sk.q().num_bits()), (400, 624));
 }
 
 #[test]
-fn every_inconsistent_component_is_rejected() {
+fn invalid_components_are_kept() {
     let sk = Rsa::private_key_from_pem(RSA_1024_PEM.as_bytes()).unwrap();
     let c = components(&sk);
     for i in 0..8 {
         let mut corrupted = c.clone();
         let last = corrupted[i].len() - 1;
         corrupted[i][last] ^= 2;
-        assert!(from_components(&corrupted).is_err(), "component {}", i);
+        let corrupted_key = from_components(&corrupted).unwrap();
+        let der = corrupted_key.private_key_to_der().unwrap();
+        assert!(Rsa::private_key_from_der(&der).is_err(), "component {i}");
+        let pem = corrupted_key.private_key_to_pem().unwrap();
+        assert!(Rsa::private_key_from_pem(&pem).is_err(), "component {i}");
+        if i != 2 {
+            assert_unusable(&corrupted_key, &corrupted);
+            continue;
+        }
+        // BoringSSL doesn't need d when it has the CRT values, so the key still works.
+        assert!(!corrupted_key.check_key().unwrap());
+        assert_eq!(components(&corrupted_key), corrupted);
+        assert_eq!(sign(&corrupted_key, b"no d"), sign(&sk, b"no d"));
     }
-    // p and q swapped: the CRT values no longer match.
     let mut swapped = c.clone();
     swapped.swap(3, 4);
-    assert!(from_components(&swapped).is_err());
-}
+    assert_unusable(&from_components(&swapped).unwrap(), &swapped);
 
-fn reencoded(der: &[u8], change: impl FnOnce(&mut [Vec<u8>; 8])) -> Vec<u8> {
-    use rrsa::pkcs1::der::Encode;
-    use rrsa::pkcs1::UintRef;
-
-    let key = rrsa::pkcs1::RsaPrivateKey::try_from(der).unwrap();
-    let mut c = [
-        key.modulus,
-        key.public_exponent,
-        key.private_exponent,
-        key.prime1,
-        key.prime2,
-        key.exponent1,
-        key.exponent2,
-        key.coefficient,
-    ]
-    .map(|x| x.as_bytes().to_vec());
-    change(&mut c);
-    rrsa::pkcs1::RsaPrivateKey {
-        modulus: UintRef::new(&c[0]).unwrap(),
-        public_exponent: UintRef::new(&c[1]).unwrap(),
-        private_exponent: UintRef::new(&c[2]).unwrap(),
-        prime1: UintRef::new(&c[3]).unwrap(),
-        prime2: UintRef::new(&c[4]).unwrap(),
-        exponent1: UintRef::new(&c[5]).unwrap(),
-        exponent2: UintRef::new(&c[6]).unwrap(),
-        coefficient: UintRef::new(&c[7]).unwrap(),
-        other_prime_infos: None,
-    }
-    .to_der()
-    .unwrap()
+    // d still has to fit in the size of n, though.
+    let mut long_d = c.clone();
+    long_d[2].insert(0, 1);
+    assert_unusable(&from_components(&long_d).unwrap(), &long_d);
 }
 
 #[test]
-fn encoded_crt_values_are_checked() {
-    use rrsa::pkcs1::der::pem::LineEnding;
-    use rrsa::pkcs1::der::EncodePem;
+fn any_components_are_accepted() {
+    // A textbook key, far too small to be used.
+    let c = [
+        vec![0x0c, 0xa1],
+        vec![17],
+        vec![0x0a, 0xc1],
+        vec![61],
+        vec![53],
+        vec![53],
+        vec![49],
+        vec![38],
+    ];
+    let sk = from_components(&c).unwrap();
+    assert_unusable(&sk, &c);
+    let expected_der: [u8; 31] =
+        hex("301d02010002020ca102011102020ac102013d020135020135020131020126");
+    assert_eq!(sk.private_key_to_der().unwrap(), expected_der);
+    assert!(Rsa::private_key_from_der(&sk.private_key_to_der().unwrap()).is_err());
 
-    let (_, der) = rrsa::pkcs8::SecretDocument::from_pem(RSA_1024_PEM).unwrap();
-    let der = der.as_bytes().to_vec();
-    assert_eq!(reencoded(&der, |_| {}), der);
-    Rsa::private_key_from_der(&der).unwrap();
+    let pk = sk.public_key().unwrap();
+    assert!(!pk.check_key().unwrap());
+    assert_eq!(pk.size(), 2);
+    let expected_pkcs1: [u8; 9] = hex("300702020ca1020111");
+    assert_eq!(pk.public_key_to_der_pkcs1().unwrap(), expected_pkcs1);
+    let mut ciphertext = [0u8; 2];
+    assert!(pk
+        .public_encrypt(&[0, 1], &mut ciphertext, Padding::NONE)
+        .is_err());
 
-    // exponent1, exponent2 and coefficient used to be dropped and recomputed.
-    for i in 2..8 {
-        let corrupted = reencoded(&der, |c| {
-            let last = c[i].len() - 1;
-            c[i][last] ^= 2;
-        });
-        assert!(
-            Rsa::private_key_from_der(&corrupted).is_err(),
-            "field {}",
-            i
-        );
-        let key = rrsa::pkcs1::RsaPrivateKey::try_from(&corrupted[..]).unwrap();
-        let pem = key.to_pem(LineEnding::LF).unwrap();
-        assert!(
-            Rsa::private_key_from_pem(pem.as_bytes()).is_err(),
-            "field {}",
-            i
-        );
+    for (n, e) in [
+        (vec![0x0c, 0xa2], vec![17]),
+        (vec![0x0c, 0xa1], vec![1]),
+        (vec![], vec![]),
+    ] {
+        let pk = Rsa::from_public_components(
+            BigNum::from_slice(&n).unwrap(),
+            BigNum::from_slice(&e).unwrap(),
+        )
+        .unwrap();
+        assert!(!pk.check_key().unwrap());
+        assert_eq!((pk.n().to_vec(), pk.e().to_vec()), (n, e));
+        pk.public_key_to_der().unwrap();
     }
 }
 
@@ -276,7 +301,8 @@ fn multi_prime_keys_are_rejected() {
 // `openssl pkeyutl -encrypt -pkeyopt rsa_padding_mode:oaep` with RSA_1024_PEM, which
 // leaves both the label hash and MGF1 at their SHA-1 default, as BoringSSL does.
 const OPENSSL_OAEP_PLAINTEXT: &[u8] = b"sixteen byte key";
-const OPENSSL_OAEP_CIPHERTEXT: &str = "5f69a52e31ea9d9cd6bbf4d20cd6e20dc9ad6468b0385c5fae8e857c7b4942d1\
+const OPENSSL_OAEP_CIPHERTEXT: &str =
+    "5f69a52e31ea9d9cd6bbf4d20cd6e20dc9ad6468b0385c5fae8e857c7b4942d1\
      fd140867f603fb568b59d77a2071b62c0ddcaec98d52a64c795150e05f90ec05\
      03a19ac472cb2f42dfd7b24d688d7de37ad176eb6759011a761610045496ab3e\
      56aef41a73c4c8ced6169fc6844e64746a52a5a7c50fa5bbbab76594c903daca";
@@ -335,9 +361,6 @@ fn oaep_sha1_decode(em: &[u8]) -> Vec<u8> {
 
 #[test]
 fn oaep_encrypts_like_openssl() {
-    use rrsa::pkcs1::DecodeRsaPrivateKey;
-    use rrsa::traits::PublicKeyParts;
-
     let sk = Rsa::private_key_from_pem(RSA_1024_PEM.as_bytes()).unwrap();
     let pk = sk.public_key().unwrap();
     let mut ciphertext = [0u8; 128];
@@ -346,12 +369,287 @@ fn oaep_encrypts_like_openssl() {
         .unwrap();
     assert_eq!(len, 128);
 
-    let key = rrsa::RsaPrivateKey::from_pkcs1_pem(RSA_1024_PEM).unwrap();
-    let c = rrsa::BigUint::from_bytes_be(&ciphertext);
-    let m = rrsa::hazmat::rsa_decrypt_and_check(&key, None::<&mut rand::rngs::ThreadRng>, &c)
+    let mut em = [0u8; 128];
+    sk.private_decrypt(&ciphertext, &mut em, Padding::NONE)
         .unwrap();
-    let mut em = vec![0u8; key.size()];
-    let m = m.to_bytes_be();
-    em[key.size() - m.len()..].copy_from_slice(&m);
     assert_eq!(oaep_sha1_decode(&em), OPENSSL_OAEP_PLAINTEXT);
+}
+
+fn sign(sk: &Rsa<crate::pkey::Private>, msg: &[u8]) -> Vec<u8> {
+    let pkey = PKey::from_rsa(sk.clone()).unwrap();
+    let mut signer = Signer::new(MessageDigest::sha256(), &pkey).unwrap();
+    signer.set_rsa_padding(Padding::PKCS1).unwrap();
+    signer.sign_oneshot_to_vec(msg).unwrap()
+}
+
+fn sign_pss(
+    sk: &Rsa<crate::pkey::Private>,
+    md: MessageDigest,
+    mgf1_md: MessageDigest,
+    salt_len: RsaPssSaltlen,
+    msg: &[u8],
+) -> Vec<u8> {
+    let pkey = PKey::from_rsa(sk.clone()).unwrap();
+    let mut signer = Signer::new(md, &pkey).unwrap();
+    signer.set_rsa_padding(Padding::PKCS1_PSS).unwrap();
+    signer.set_rsa_pss_saltlen(salt_len).unwrap();
+    signer.set_rsa_mgf1_md(mgf1_md).unwrap();
+    signer.sign_oneshot_to_vec(msg).unwrap()
+}
+
+fn verify_pss(
+    pk: &Rsa<crate::pkey::Public>,
+    md: MessageDigest,
+    mgf1_md: MessageDigest,
+    salt_len: RsaPssSaltlen,
+    msg: &[u8],
+    signature: &[u8],
+) -> bool {
+    let pkey = PKey::from_rsa(pk.clone()).unwrap();
+    let mut verifier = Verifier::new(md, &pkey).unwrap();
+    verifier.set_rsa_padding(Padding::PKCS1_PSS).unwrap();
+    verifier.set_rsa_pss_saltlen(salt_len).unwrap();
+    verifier.set_rsa_mgf1_md(mgf1_md).unwrap();
+    verifier.verify_oneshot(signature, msg).unwrap()
+}
+
+#[test]
+fn private_keys_are_serialized_as_pkcs1() {
+    use rrsa::pkcs8::EncodePrivateKey;
+
+    let sk = Rsa::private_key_from_pem(RSA_1024_PEM.as_bytes()).unwrap();
+    let (_, pkcs1) = rrsa::pkcs8::SecretDocument::from_pem(RSA_1024_PEM).unwrap();
+    assert_eq!(sk.private_key_to_der().unwrap(), pkcs1.as_bytes());
+    assert!(sk
+        .private_key_to_pem()
+        .unwrap()
+        .starts_with(b"-----BEGIN RSA PRIVATE KEY-----\n"));
+
+    // PKCS#8 is only accepted in PEM.
+    let RsaKey::Private(key) = &sk.rsa_key else {
+        unreachable!()
+    };
+    let pkcs8 = key.to_pkcs8_der().unwrap();
+    assert!(Rsa::private_key_from_der(pkcs8.as_bytes()).is_err());
+    let pkcs8_pem = key.to_pkcs8_pem(Default::default()).unwrap();
+    let parsed = Rsa::private_key_from_pem(pkcs8_pem.as_bytes()).unwrap();
+    assert_eq!(parsed.private_key_to_der().unwrap(), pkcs1.as_bytes());
+}
+
+#[test]
+fn modulus_sizes_follow_boringssl() {
+    use rrsa::pkcs1::der::Encode;
+
+    let e = [1, 0, 1];
+    for (bits, accepted) in [
+        (511, false),
+        (512, true),
+        (1023, true),
+        (8193, true),
+        (16384, true),
+        (16385, false),
+    ] {
+        let mut n = vec![0x5a; bits / 8 + 1];
+        n[0] = 1 << ((bits - 1) % 8);
+        if bits % 8 == 0 {
+            n.remove(0);
+            n[0] |= 0x80;
+        }
+        *n.last_mut().unwrap() |= 1;
+        let pk = Rsa::from_public_components(
+            BigNum::from_slice(&n).unwrap(),
+            BigNum::from_slice(&e).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(pk.bits() as usize, bits);
+        assert_eq!(pk.check_key().unwrap(), accepted, "{bits} bits");
+        let mut ciphertext = vec![0u8; pk.size() as usize];
+        let encrypted = pk.public_encrypt(b"size", &mut ciphertext, Padding::PKCS1);
+        assert_eq!(encrypted.is_ok(), accepted, "{bits} bits");
+        let der = rrsa::pkcs1::RsaPublicKeyRef {
+            modulus: rrsa::pkcs1::UintRef::new(&n).unwrap(),
+            public_exponent: rrsa::pkcs1::UintRef::new(&e).unwrap(),
+        }
+        .to_der()
+        .unwrap();
+        assert_eq!(
+            Rsa::public_key_from_der_pkcs1(&der).is_ok(),
+            accepted,
+            "{bits} bits"
+        );
+    }
+}
+
+#[test]
+fn rsassa_pss_public_keys_are_rejected() {
+    use rrsa::pkcs1::der::{Decode, Encode};
+    use rrsa::pkcs8::{DecodePublicKey, EncodePublicKey, ObjectIdentifier};
+
+    let pk = Rsa::private_key_from_pem(RSA_1024_PEM.as_bytes())
+        .unwrap()
+        .public_key()
+        .unwrap();
+    let der = pk.public_key_to_der().unwrap();
+    let RsaKey::Public(key) = &pk.rsa_key else {
+        unreachable!()
+    };
+    assert_eq!(der, key.to_public_key_der().unwrap().as_bytes());
+
+    let mut spki = rrsa::pkcs8::SubjectPublicKeyInfoRef::from_der(&der).unwrap();
+    spki.algorithm.oid = ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.10");
+    spki.algorithm.parameters = None;
+    let rsassa_pss = spki.to_der().unwrap();
+    // The rsa crate would take it.
+    rrsa::PublicKey::from_public_key_der(&rsassa_pss).unwrap();
+    assert!(Rsa::public_key_from_der(&rsassa_pss).is_err());
+}
+
+#[test]
+fn raw_rsa_and_pkcs1_padding() {
+    let sk = Rsa::private_key_from_pem(RSA_1024_PEM.as_bytes()).unwrap();
+    let pk = sk.public_key().unwrap();
+    let decrypt = |em: &[u8]| {
+        let (mut ciphertext, mut plaintext) = ([0u8; 128], [0u8; 128]);
+        pk.public_encrypt(em, &mut ciphertext, Padding::NONE)
+            .unwrap();
+        sk.private_decrypt(&ciphertext, &mut plaintext, Padding::NONE)
+            .unwrap();
+        assert_eq!(plaintext.as_slice(), em);
+        sk.private_decrypt(&ciphertext, &mut plaintext, Padding::PKCS1)
+            .map(|len| plaintext[..len].to_vec())
+    };
+    let separator_at = |i: usize| {
+        let mut em = vec![0x55u8; 128];
+        em[0] = 0;
+        em[1] = 2;
+        em[i] = 0;
+        em
+    };
+
+    // The padding has to be at least 8 bytes long.
+    assert!(decrypt(&separator_at(9)).is_err());
+    assert_eq!(decrypt(&separator_at(10)).unwrap(), vec![0x55; 117]);
+    assert_eq!(decrypt(&separator_at(127)).unwrap(), Vec::<u8>::new());
+
+    let mut no_separator = separator_at(10);
+    no_separator[10] = 0x55;
+    assert!(decrypt(&no_separator).is_err());
+    for (i, x) in [(0, 1), (1, 1), (1, 0)] {
+        let mut em = separator_at(10);
+        em[i] = x;
+        assert!(decrypt(&em).is_err(), "byte {i} set to {x}");
+    }
+
+    // Raw RSA needs a value of the same size as n, and smaller.
+    let n = sk.n().to_vec();
+    let mut out = [0u8; 128];
+    assert!(pk.public_encrypt(&n, &mut out, Padding::NONE).is_err());
+    assert!(sk.private_decrypt(&n, &mut out, Padding::NONE).is_err());
+    assert!(pk.public_encrypt(&n[1..], &mut out, Padding::NONE).is_err());
+}
+
+#[test]
+fn signer_options_follow_boringssl() {
+    let sk = Rsa::private_key_from_pem(RSA_1024_PEM.as_bytes()).unwrap();
+    let pkey = PKey::from_rsa(sk.clone()).unwrap();
+    let mut signer = Signer::new(MessageDigest::sha256(), &pkey).unwrap();
+    assert_eq!(signer.rsa_padding().unwrap(), Padding::PKCS1);
+    assert!(signer
+        .set_rsa_pss_saltlen(RsaPssSaltlen::DIGEST_LENGTH)
+        .is_err());
+    assert!(signer.set_rsa_mgf1_md(MessageDigest::sha256()).is_err());
+    assert!(signer.set_rsa_padding(Padding::PKCS1_OAEP).is_err());
+    assert!(signer.set_rsa_padding(Padding::NONE).is_err());
+    let signature = signer.sign_oneshot_to_vec(b"default padding").unwrap();
+    assert_eq!(signature, sign(&sk, b"default padding"));
+
+    signer.set_rsa_padding(Padding::PKCS1_PSS).unwrap();
+    assert!(signer
+        .set_rsa_pss_saltlen(RsaPssSaltlen::custom(-3))
+        .is_err());
+    signer
+        .set_rsa_pss_saltlen(RsaPssSaltlen::MAXIMUM_LENGTH)
+        .unwrap();
+    signer.set_rsa_mgf1_md(MessageDigest::sha512()).unwrap();
+
+    let pkey = PKey::from_rsa(sk.public_key().unwrap()).unwrap();
+    let mut verifier = Verifier::new(MessageDigest::sha256(), &pkey).unwrap();
+    assert!(verifier.set_rsa_padding(Padding::PKCS1_OAEP).is_err());
+    assert!(verifier.set_rsa_mgf1_md(MessageDigest::sha256()).is_err());
+    assert!(verifier
+        .verify_oneshot(&signature, b"default padding")
+        .unwrap());
+}
+
+// `openssl dgst -sha256 -sigopt rsa_padding_mode:pss -sigopt rsa_mgf1_md:sha512 -sigopt rsa_pss_saltlen:20` with RSA_1024_PEM.
+const OPENSSL_PSS_MESSAGE: &[u8] = b"PSS with a different MGF1 hash";
+const OPENSSL_PSS_SIGNATURE: &str =
+    "5c14ca9c1f8a2e2880de5c6cd5b546a9b97a807b5b6a26216960e0acdbf9417e\
+     657b66ba73487605a326283f03760343cedfa701f0e366ea97e958bfcf4120b9\
+     31ddcabb75c1cd8d032344667b3aa1ee2e509706b2025012bbc08ec649279ff5\
+     e3a726e93492257b5a0e49b06c12f2cb6e9deab6f266fdb79f0763598173e247";
+
+#[test]
+fn pss_follows_boringssl() {
+    let sk = Rsa::private_key_from_pem(RSA_1024_PEM.as_bytes()).unwrap();
+    let pk = sk.public_key().unwrap();
+    let signature: [u8; 128] = hex(OPENSSL_PSS_SIGNATURE);
+    let verify = |mgf1_md: MessageDigest, salt_len: RsaPssSaltlen| {
+        let md = MessageDigest::sha256();
+        verify_pss(&pk, md, mgf1_md, salt_len, OPENSSL_PSS_MESSAGE, &signature)
+    };
+    assert!(verify(MessageDigest::sha512(), RsaPssSaltlen::custom(20)));
+    assert!(verify(
+        MessageDigest::sha512(),
+        RsaPssSaltlen::MAXIMUM_LENGTH
+    ));
+    assert!(!verify(
+        MessageDigest::sha512(),
+        RsaPssSaltlen::DIGEST_LENGTH
+    ));
+    assert!(!verify(MessageDigest::sha256(), RsaPssSaltlen::custom(20)));
+
+    let mds = [
+        MessageDigest::sha256(),
+        MessageDigest::sha384(),
+        MessageDigest::sha512(),
+    ];
+    let (md, salt_len) = (MessageDigest::sha384, RsaPssSaltlen::DIGEST_LENGTH);
+    for mgf1_md in mds.clone() {
+        let signature = sign_pss(&sk, md(), mgf1_md.clone(), salt_len, b"mgf1");
+        for other in mds.clone() {
+            let valid = verify_pss(&pk, md(), other.clone(), salt_len, b"mgf1", &signature);
+            assert_eq!(valid, other == mgf1_md);
+        }
+    }
+
+    // With a 1025-bit modulus, the largest salt is one byte shorter than it seems.
+    let sk = Rsa::private_key_from_pem(RSA_1025_PEM.as_bytes()).unwrap();
+    let pk = sk.public_key().unwrap();
+    let md = MessageDigest::sha256;
+    let signature = sign_pss(&sk, md(), md(), RsaPssSaltlen::MAXIMUM_LENGTH, b"max salt");
+    let verify = |salt_len| verify_pss(&pk, md(), md(), salt_len, b"max salt", &signature);
+    assert!(verify(RsaPssSaltlen::custom(128 - 32 - 2)));
+    assert!(!verify(RsaPssSaltlen::custom(128 - 32 - 1)));
+    assert!(!verify(RsaPssSaltlen::DIGEST_LENGTH));
+    // When verifying, MAXIMUM_LENGTH accepts any salt length.
+    assert!(verify(RsaPssSaltlen::MAXIMUM_LENGTH));
+}
+
+#[test]
+fn generated_key_sizes_follow_boringssl() {
+    for (bits, expected) in [
+        (511, None),
+        (512, Some(512)),
+        (1000, Some(896)),
+        (16385, None),
+    ] {
+        match Rsa::generate(bits) {
+            Ok(sk) => {
+                assert_eq!(Some(sk.bits()), expected, "{bits} bits");
+                assert!(sk.check_key().unwrap());
+            }
+            Err(_) => assert_eq!(expected, None, "{bits} bits"),
+        }
+    }
 }
